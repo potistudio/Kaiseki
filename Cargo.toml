@@ -1,0 +1,13 @@
+[package]
+name = "kaiseki"
+description = "Smart reverse engineering supporter"
+authors = ["potistudio <potistudio@proton.me>"]
+version = "0.1.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform" }
+syntect = "5"
