@@ -215,12 +215,6 @@ struct SmoothScroll {
 	animating: bool,
 }
 
-struct CodeViewer {
-	lines: Arc<Vec<HighlightedLine>>,
-	scroll_handle: UniformListScrollHandle,
-	smooth: SmoothScroll,
-}
-
 // -- Color helpers ------------------------------------------------------------
 
 fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
@@ -233,7 +227,13 @@ fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
 	.into()
 }
 
-// -- Business logic -----------------------------------------------------------
+// -- Elements -----------------------------------------------------------------
+
+struct CodeViewer {
+	lines: Arc<Vec<HighlightedLine>>,
+	scroll_handle: UniformListScrollHandle,
+	smooth: SmoothScroll,
+}
 
 impl CodeViewer {
 	fn new(_cx: &mut Context<Self>) -> Self {
@@ -348,7 +348,7 @@ impl Render for CodeViewer {
 					.flex_1()
 					.overflow_hidden()
 					.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-						let actual_y = this.scroll_handle.0.borrow().base_handle.offset().y.as_f32();
+						let actual_y = this.scroll_handle.0.borrow().base_handle.offset().y.to_f64() as f32;
 
 						if event.delta.precise() {
 							// Touchpad: stay in sync, let GPUI handle natively
@@ -359,7 +359,7 @@ impl Render for CodeViewer {
 
 						// Mouse wheel: undo instant scroll, drive smooth animation
 						let line_height = window.line_height();
-						let delta_y = event.delta.pixel_delta(line_height).y.as_f32();
+						let delta_y = event.delta.pixel_delta(line_height).y.to_f64() as f32;
 
 						// Undo what uniform_list's scroll handler already applied
 						{
@@ -370,7 +370,7 @@ impl Render for CodeViewer {
 						// Accumulate toward target and clamp
 						this.smooth.target_y += delta_y;
 						if let Some(size) = this.scroll_handle.0.borrow().last_item_size {
-							let max_neg = -(size.contents.height.as_f32() - size.item.height.as_f32()).max(0.0);
+							let max_neg = -(size.contents.height.to_f64() - size.item.height.to_f64()).max(0.0) as f32;
 							this.smooth.target_y = this.smooth.target_y.max(max_neg).min(0.0);
 						}
 
@@ -414,7 +414,7 @@ impl Render for CodeViewer {
 						})
 						.size_full()
 						.py(px(8.))
-						.track_scroll(&self.scroll_handle),
+						.track_scroll(self.scroll_handle.clone()),
 					),
 			)
 	}
@@ -423,20 +423,17 @@ impl Render for CodeViewer {
 // -- Entry point --------------------------------------------------------------
 
 fn main() {
-	gpui_platform::application().run(|cx: &mut App| {
-		let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-		cx.open_window(
-			WindowOptions {
-				window_bounds: Some(WindowBounds::Windowed(bounds)),
-				titlebar: Some(TitlebarOptions {
-					title: Some("Kaiseki — Code Viewer".into()),
-					..Default::default()
-				}),
+	Application::new().run(|app| {
+		let options = WindowOptions {
+			titlebar: Some(TitlebarOptions {
+				title: Some("Kaiseki".into()),
 				..Default::default()
-			},
-			|_window, cx| cx.new(|cx| CodeViewer::new(cx)),
-		)
-		.unwrap();
-		cx.activate(true);
+			}),
+			..Default::default()
+		};
+
+		app.open_window(options, |_window, cx| cx.new(CodeViewer::new))
+			.expect("Failed to open window");
+		app.activate(true);
 	});
 }
