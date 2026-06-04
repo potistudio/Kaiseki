@@ -202,7 +202,7 @@ LAB_180e2b65e:
 
 "#;
 
-// ── Data model ──────────────────────────────────────────────────────────────
+// -- Data model --------------------------------------------------------------
 
 struct HighlightedLine {
 	text: SharedString,
@@ -221,7 +221,7 @@ struct CodeViewer {
 	smooth: SmoothScroll,
 }
 
-// ── Color helpers ────────────────────────────────────────────────────────────
+// -- Color helpers ------------------------------------------------------------
 
 fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
 	Rgba {
@@ -233,7 +233,7 @@ fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
 	.into()
 }
 
-// ── Business logic ───────────────────────────────────────────────────────────
+// -- Business logic -----------------------------------------------------------
 
 impl CodeViewer {
 	fn new(_cx: &mut Context<Self>) -> Self {
@@ -302,11 +302,11 @@ impl CodeViewer {
 	}
 }
 
-// ── Rendering ────────────────────────────────────────────────────────────────
+// -- Rendering ----------------------------------------------------------------
 
 impl Render for CodeViewer {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-		// ── Advance smooth-scroll animation ───────────────────────────────
+		// -- Advance smooth-scroll animation -------------------------------
 		if self.smooth.animating {
 			let diff = self.smooth.target_y - self.smooth.current_y;
 			if diff.abs() < 0.5 {
@@ -329,7 +329,7 @@ impl Render for CodeViewer {
 			.flex()
 			.flex_col()
 			.bg(rgb(0x1e1e2e)) // Catppuccin Base
-			// ── Title bar ─────────────────────────────────────────────────
+			// -- Title bar -------------------------------------------------
 			.child(
 				div()
 					.h(px(40.))
@@ -339,10 +339,10 @@ impl Render for CodeViewer {
 					.bg(rgb(0x181825)) // Catppuccin Mantle
 					.text_size(px(13.))
 					.text_color(rgba(0xa6adc8ff))
-					.font_family("Consolas")
+					.font_family("JetBrains Mono")
 					.child("kaiseki — main.rs"),
 			)
-			// ── Code area ─────────────────────────────────────────────────
+			// -- Code area -------------------------------------------------
 			.child(
 				div()
 					.flex_1()
@@ -420,7 +420,7 @@ impl Render for CodeViewer {
 	}
 }
 
-// ── Entry point ──────────────────────────────────────────────────────────────
+// -- Entry point --------------------------------------------------------------
 
 fn main() {
 	gpui_platform::application().run(|cx: &mut App| {
