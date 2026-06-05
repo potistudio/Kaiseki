@@ -1,6 +1,28 @@
 pub mod ast;
 pub mod render;
 
+use std::ops::Range;
+
+/// One entry in a source map written by the LLM alongside the KSL it generates.
+/// Maps a KSL trigger line to a range of lines in the original decompiled-C source.
+pub struct SourceSpan {
+	/// Short label shown on the accordion toggle button.
+	pub label: &'static str,
+	/// 0-based KSL display-line index that carries the expand/collapse button.
+	/// Typically the section-header comment line (// ── name ──).
+	pub ksl_trigger_line: usize,
+	/// 0-based range into the decompiled-C Panel line vector.
+	pub source_lines: Range<usize>,
+}
+
+/// Hand-authored source map for the sample KSL / C pair.
+/// In production the LLM writes this alongside the KSL it generates.
+pub const SAMPLE_SOURCE_MAP: &[SourceSpan] = &[
+	SourceSpan { label: "acquire stream",         ksl_trigger_line: 52, source_lines: 33..54 },
+	SourceSpan { label: "resolve time",           ksl_trigger_line: 62, source_lines: 54..83 },
+	SourceSpan { label: "key-frame data",         ksl_trigger_line: 75, source_lines: 83..185 },
+];
+
 /// KSL (Kaiseki Script Language) — lifted rendering of NIM_GetStreamFPV.
 ///
 /// This demonstrates the language by hand-writing the high-level form.

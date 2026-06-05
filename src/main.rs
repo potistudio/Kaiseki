@@ -1,7 +1,7 @@
 mod lang;
 
-use gpui::*;
-use std::{ops::Range, sync::Arc};
+use gpui::{prelude::*, *};
+use std::{collections::HashSet, ops::Range, sync::Arc};
 use syntect::{
 	easy::HighlightLines,
 	highlighting::{FontStyle as SyntectFontStyle, ThemeSet},
@@ -357,7 +357,7 @@ fn render_code_row(
 	num: String,
 	text: SharedString,
 	highlights: Vec<(Range<usize>, HighlightStyle)>,
-) -> impl IntoElement {
+) -> Div {
 	div()
 		.h(px(22.))
 		.flex()
@@ -383,19 +383,80 @@ fn render_code_row(
 		.child(StyledText::new(text).with_highlights(highlights))
 }
 
+// -- Accordion display row ----------------------------------------------------
+
+/// One entry in the flattened list rendered by the KSL panel.
+/// Normal KSL lines and expanded C-source snippets share the same 22-px row
+/// height, so a single uniform_list-style loop can handle both.
+#[derive(Clone)]
+enum DisplayRow {
+	/// A normal KSL code line.  When `span_idx` is Some this line also shows
+	/// the accordion toggle button (it is the section-header comment line).
+	KslLine { ksl_idx: usize, span_idx: Option<usize>, is_expanded: bool, label: &'static str },
+	/// A decompiled-C line revealed by an open accordion entry.
+	SourceLine { source_idx: usize, is_last: bool },
+}
+
 // -- Top-level view -----------------------------------------------------------
 
 struct KaisekiApp {
-	left: Panel,  // decompiled C
-	right: Panel, // KSL lifted pseudocode
+	main_panel: Panel,              // KSL lifted pseudocode (primary view)
+	source_panel: Panel,            // decompiled C (accordion snippets)
+	source_map: Vec<lang::SourceSpan>,
+	expanded_spans: HashSet<usize>, // indices into source_map
+	focus_handle: FocusHandle,
 }
 
 impl KaisekiApp {
-	fn new(_cx: &mut Context<Self>) -> Self {
+	fn new(cx: &mut Context<Self>) -> Self {
 		Self {
-			left: Panel::from_code(SAMPLE_CODE, "cpp"),
-			right: Panel::from_code(lang::SAMPLE_KSL, "rs"),
+			main_panel: Panel::from_code(lang::SAMPLE_KSL, "rs"),
+			source_panel: Panel::from_code(SAMPLE_CODE, "cpp"),
+			source_map: lang::SAMPLE_SOURCE_MAP
+				.iter()
+				.map(|s| lang::SourceSpan {
+					label: s.label,
+					ksl_trigger_line: s.ksl_trigger_line,
+					source_lines: s.source_lines.clone(),
+				})
+				.collect(),
+			expanded_spans: HashSet::new(),
+			focus_handle: cx.focus_handle(),
 		}
+	}
+
+	/// Build the flat list of display rows from the current KSL lines and
+	/// expansion state.  Expanded spans insert source-snippet rows directly
+	/// after the trigger KSL line.
+	fn build_display_rows(&self) -> Vec<DisplayRow> {
+		let ksl_count = self.main_panel.lines.len();
+		let mut rows = Vec::with_capacity(ksl_count);
+
+		for ksl_idx in 0..ksl_count {
+			let span_idx = self
+				.source_map
+				.iter()
+				.position(|s| s.ksl_trigger_line == ksl_idx);
+
+			let (is_expanded, label) = match span_idx {
+				Some(si) => (self.expanded_spans.contains(&si), self.source_map[si].label),
+				None => (false, ""),
+			};
+
+			rows.push(DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label });
+
+			if let Some(si) = span_idx {
+				if self.expanded_spans.contains(&si) {
+					let range = self.source_map[si].source_lines.clone();
+					let last = range.end.saturating_sub(1);
+					for source_idx in range {
+						rows.push(DisplayRow::SourceLine { source_idx, is_last: source_idx == last });
+					}
+				}
+			}
+		}
+
+		rows
 	}
 }
 
@@ -403,24 +464,48 @@ impl KaisekiApp {
 
 impl Render for KaisekiApp {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-		// Advance smooth-scroll animations for both panels.
-		advance_smooth_scroll(&mut self.left, window);
-		advance_smooth_scroll(&mut self.right, window);
+		advance_smooth_scroll(&mut self.main_panel, window);
 
-		let left_lines = self.left.lines.clone();
-		let right_lines = self.right.lines.clone();
-		let left_count = left_lines.len();
-		let right_count = right_lines.len();
-		let left_gutter = left_count.to_string().len();
-		let right_gutter = right_count.to_string().len();
-		let left_scroll = self.left.scroll_handle.clone();
-		let right_scroll = self.right.scroll_handle.clone();
+		let display_rows = Arc::new(self.build_display_rows());
+		let row_count = display_rows.len();
+
+		let main_lines  = self.main_panel.lines.clone();
+		let source_lines = self.source_panel.lines.clone();
+		let main_scroll = self.main_panel.scroll_handle.clone();
+		let main_gutter = self.main_panel.lines.len().to_string().len();
+		let source_gutter = self.source_panel.lines.len().to_string().len();
+
+		// One toggle listener per source-map span, built before the element tree.
+		// Using MouseDownEvent instead of ClickEvent — on_mouse_down is on InteractiveElement
+		// and works on plain Div without needing .id() / StatefulInteractiveElement.
+		let mut toggle_fns: Vec<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>> =
+			Vec::new();
+		for sidx in 0..self.source_map.len() {
+			let f = cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+				if this.expanded_spans.contains(&sidx) {
+					this.expanded_spans.remove(&sidx);
+				} else {
+					this.expanded_spans.insert(sidx);
+				}
+				cx.notify();
+			});
+			toggle_fns.push(Box::new(f));
+		}
+		let toggle_fns = Arc::new(toggle_fns);
+
+		let scroll_listener = cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+			if handle_panel_scroll(&mut this.main_panel, event, window) {
+				cx.notify();
+			}
+		});
 
 		div()
 			.size_full()
 			.flex()
 			.flex_col()
-			.bg(rgb(0x1e1e2e)) // Catppuccin Base
+			.bg(rgb(0x1e1e2e))
+			.key_context("KaisekiApp")
+			.track_focus(&self.focus_handle)
 			// -- App title bar ------------------------------------------------
 			.child(
 				div()
@@ -428,97 +513,91 @@ impl Render for KaisekiApp {
 					.flex()
 					.items_center()
 					.px(px(16.))
-					.bg(rgb(0x181825)) // Catppuccin Mantle
+					.bg(rgb(0x181825))
 					.text_size(px(13.))
 					.text_color(rgba(0xa6adc8ff))
 					.font_family("JetBrains Mono")
 					.child("kaiseki"),
 			)
-			// -- Split view body ----------------------------------------------
+			// -- KSL panel with inline accordion ------------------------------
 			.child(
 				div()
 					.flex_1()
 					.flex()
-					.flex_row()
+					.flex_col()
 					.overflow_hidden()
-					// ── Left panel: decompiled C ─────────────────────────────
+					.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
 					.child(
 						div()
 							.flex_1()
-							.flex()
-							.flex_col()
 							.overflow_hidden()
-							// Panel header
-							.child(panel_header("decompiled.c — NIM_GetStreamFPV", "C", rgba(0xe6894555)))
-							// Scrollable code area
+							.on_scroll_wheel(scroll_listener)
 							.child(
-								div()
-									.flex_1()
-									.overflow_hidden()
-									.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-										if handle_panel_scroll(&mut this.left, event, window) {
-											cx.notify();
-										}
-									}))
-									.child(
-										uniform_list(
-											"left-code-lines",
-											left_count,
-											move |range, _window, _cx| {
-												range
-													.map(|i| {
-														let line = &left_lines[i];
-														let num = format!("{:>width$}", i + 1, width = left_gutter);
-														render_code_row(num, line.text.clone(), line.highlights.clone())
-													})
-													.collect::<Vec<_>>()
-											},
-										)
-										.size_full()
-										.py(px(8.))
-										.track_scroll(left_scroll),
-									),
-							),
-					)
-					// ── Vertical divider ─────────────────────────────────────
-					.child(div().w(px(1.)).h_full().bg(rgb(0x313244)))
-					// ── Right panel: KSL lifted pseudocode ───────────────────
-					.child(
-						div()
-							.flex_1()
-							.flex()
-							.flex_col()
-							.overflow_hidden()
-							// Panel header
-							.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
-							// Scrollable code area
-							.child(
-								div()
-									.flex_1()
-									.overflow_hidden()
-									.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-										if handle_panel_scroll(&mut this.right, event, window) {
-											cx.notify();
-										}
-									}))
-									.child(
-										uniform_list(
-											"right-code-lines",
-											right_count,
-											move |range, _window, _cx| {
-												range
-													.map(|i| {
-														let line = &right_lines[i];
-														let num = format!("{:>width$}", i + 1, width = right_gutter);
-														render_code_row(num, line.text.clone(), line.highlights.clone())
-													})
-													.collect::<Vec<_>>()
-											},
-										)
-										.size_full()
-										.py(px(8.))
-										.track_scroll(right_scroll),
-									),
+								uniform_list(
+									"ksl-rows",
+									row_count,
+									move |range, _window, _cx| {
+										range
+											.map(|i| match &display_rows[i] {
+												DisplayRow::KslLine {
+													ksl_idx,
+													span_idx,
+													is_expanded,
+													label,
+												} => {
+													let line = &main_lines[*ksl_idx];
+													let num = format!(
+														"{:>width$}",
+														ksl_idx + 1,
+														width = main_gutter
+													);
+													match span_idx {
+														Some(sidx) => {
+															let sidx = *sidx;
+															let handler =
+																Arc::clone(&toggle_fns);
+																					render_accordion_row(
+																num,
+																line.text.clone(),
+																line.highlights.clone(),
+																label,
+																*is_expanded,
+																move |e, w, cx| {
+																	(handler[sidx])(e, w, cx)
+																},
+															)
+														}
+														None => render_code_row(
+															num,
+															line.text.clone(),
+															line.highlights.clone(),
+														),
+													}
+												}
+												DisplayRow::SourceLine {
+													source_idx,
+													is_last,
+												} => {
+													let line = &source_lines[*source_idx];
+													let num = format!(
+														"{:>width$}",
+														source_idx + 1,
+														width = source_gutter
+													);
+													render_source_snippet_row(
+														num,
+														line.text.clone(),
+														line.highlights.clone(),
+														*is_last,
+													)
+												}
+											})
+											.collect::<Vec<_>>()
+									},
+								)
+								.size_full()
+								.py(px(8.))
+								.track_scroll(main_scroll),
 							),
 					),
 			)
@@ -554,6 +633,97 @@ fn panel_header(label: &str, badge: &str, badge_bg: impl Into<Hsla>) -> impl Int
 		)
 }
 
+/// A KSL code row that carries an accordion toggle button on the right.
+/// `label` is the section name; `is_expanded` controls the chevron direction.
+fn render_accordion_row(
+	num: String,
+	text: SharedString,
+	highlights: Vec<(Range<usize>, HighlightStyle)>,
+	label: &str,
+	is_expanded: bool,
+	on_toggle: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+	let chevron = if is_expanded { "▼" } else { "▶" };
+	div()
+		.h(px(22.))
+		.flex()
+		.flex_row()
+		.items_center()
+		.font_family("Consolas")
+		.text_size(px(13.))
+		// Gutter
+		.child(
+			div()
+				.w(px(56.))
+				.h_full()
+				.flex()
+				.items_center()
+				.justify_end()
+				.pr(px(16.))
+				.text_size(px(12.))
+				.text_color(rgba(0x585b70ff))
+				.flex_shrink_0()
+				.child(num),
+		)
+		// Syntax-highlighted text
+		.child(div().flex_1().child(StyledText::new(text).with_highlights(highlights)))
+		// Toggle button — on_mouse_down works on plain Div (InteractiveElement), no .id() needed
+		.child(
+			div()
+				.flex_shrink_0()
+				.flex()
+				.items_center()
+				.gap(px(4.))
+				.px(px(8.))
+				.mr(px(8.))
+				.h(px(16.))
+				.rounded(px(3.))
+				.bg(rgba(0x31324488))
+				.text_color(rgba(0xe68945cc)) // C orange tint
+				.text_size(px(10.))
+				.font_family("JetBrains Mono")
+				.cursor_pointer()
+				.on_mouse_down(MouseButton::Left, on_toggle)
+				.child(format!("{chevron} C  {label}")),
+		)
+}
+
+/// A decompiled-C snippet row shown inside an accordion expansion.
+/// Visually distinct via a left border and slightly darker background.
+fn render_source_snippet_row(
+	num: String,
+	text: SharedString,
+	highlights: Vec<(Range<usize>, HighlightStyle)>,
+	is_last: bool,
+) -> Div {
+	div()
+		.h(px(22.))
+		.flex()
+		.flex_row()
+		.items_center()
+		.font_family("Consolas")
+		.text_size(px(13.))
+		.bg(rgba(0x181825dd))
+		.border_l(px(2.))
+		.border_color(rgba(0xe6894566)) // C orange – same family as toggle button
+		.when(is_last, |d| d.pb(px(4.)))
+		// Gutter
+		.child(
+			div()
+				.w(px(56.))
+				.h_full()
+				.flex()
+				.items_center()
+				.justify_end()
+				.pr(px(16.))
+				.text_size(px(12.))
+				.text_color(rgba(0x585b7044)) // dimmer than main gutter
+				.flex_shrink_0()
+				.child(num),
+		)
+		.child(StyledText::new(text).with_highlights(highlights))
+}
+
 // -- Entry point --------------------------------------------------------------
 
 fn main() {
@@ -566,7 +736,13 @@ fn main() {
 			..Default::default()
 		};
 
-		app.open_window(options, |_window, cx| cx.new(KaisekiApp::new))
+		app.open_window(options, |window, cx| {
+				let entity = cx.new(KaisekiApp::new);
+				// Give the root view keyboard focus so Tab events are captured.
+				let focus_handle = entity.read(cx).focus_handle.clone();
+				window.focus(&focus_handle);
+				entity
+			})
 			.expect("Failed to open window");
 		app.activate(true);
 	});
