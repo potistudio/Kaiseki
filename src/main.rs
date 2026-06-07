@@ -211,6 +211,27 @@ struct HighlightedLine {
 	highlights: Vec<(Range<usize>, HighlightStyle)>,
 }
 
+// ── Variable-highlight types ──────────────────────────────────────────────────
+
+/// Semantic role of one identifier occurrence within the KSL source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VarRole {
+	/// Binding point: `let name = …` or `var name`.
+	Definition,
+	/// Assignment to an already-bound name: `name = expr`.
+	Write,
+	/// All other usages (reads, function args, return values, …).
+	Read,
+}
+
+/// One occurrence of a variable name that should be highlighted.
+#[derive(Clone)]
+struct VarOccurrence {
+	ksl_line_idx: usize,
+	byte_range:   Range<usize>,
+	role:         VarRole,
+}
+
 struct SmoothScroll {
 	current_y: f32,
 	target_y: f32,
@@ -358,6 +379,95 @@ fn ksl_highlight_line(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
 		.collect()
 }
 
+// -- Variable-occurrence analysis ---------------------------------------------
+
+/// Scan every KSL line for tokens whose text equals `name` and classify each
+/// occurrence as Definition / Write / Read based on neighbouring tokens.
+///
+/// Role heuristics:
+///   • Preceded by `let` or `var` keyword          → Definition
+///   • Followed by `=` operator (but not `==`)     → Write
+///   • Everything else                             → Read
+fn find_var_occurrences(name: &str, lines: &Arc<Vec<HighlightedLine>>) -> Vec<VarOccurrence> {
+	use lang::lexer::{TokenKind, tokenize};
+
+	let mut result = Vec::new();
+
+	for (line_idx, line) in lines.iter().enumerate() {
+		let tokens = tokenize(&line.text);
+
+		for (tok_pos, token) in tokens.iter().enumerate() {
+			if token.kind != TokenKind::Ident {
+				continue;
+			}
+			if &line.text[token.range.clone()] != name {
+				continue;
+			}
+
+			// Walk backwards over whitespace to find preceding non-ws token.
+			let prev_kind = tokens[..tok_pos]
+				.iter()
+				.rev()
+				.find(|t| t.kind != TokenKind::Whitespace)
+				.map(|t| (t.kind, &line.text[t.range.clone()]));
+
+			// Walk forwards over whitespace to find following non-ws token.
+			let next = tokens[tok_pos + 1..]
+				.iter()
+				.find(|t| t.kind != TokenKind::Whitespace)
+				.map(|t| (t.kind, &line.text[t.range.clone()]));
+
+			let role = if matches!(&prev_kind, Some((TokenKind::Keyword, kw)) if *kw == "let" || *kw == "var") {
+				VarRole::Definition
+			} else if matches!(&next, Some((TokenKind::Operator, op)) if *op == "=") {
+				VarRole::Write
+			} else {
+				VarRole::Read
+			};
+
+			result.push(VarOccurrence {
+				ksl_line_idx: line_idx,
+				byte_range:   token.range.clone(),
+				role,
+			});
+		}
+	}
+
+	result
+}
+
+/// Build the additional highlight spans caused by a hovered variable on one
+/// line.  Uses `background_color` so that the syntax foreground color is
+/// preserved — both fields coexist in `HighlightStyle`.
+///
+/// Color palette (Catppuccin Mocha tints at ~33 % opacity):
+///   Definition  →  Lavender  #b4befe55
+///   Write       →  Yellow    #f9e2af55
+///   Read        →  Teal      #94e2d555
+fn hover_highlights_for_line(
+	occurrences: &[VarOccurrence],
+	ksl_line_idx: usize,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+	occurrences
+		.iter()
+		.filter(|o| o.ksl_line_idx == ksl_line_idx)
+		.map(|o| {
+			let bg: Hsla = match o.role {
+				VarRole::Definition => rgba(0xb4befe55).into(),
+				VarRole::Write      => rgba(0xf9e2af55).into(),
+				VarRole::Read       => rgba(0x94e2d555).into(),
+			};
+			(
+				o.byte_range.clone(),
+				HighlightStyle {
+					background_color: Some(bg),
+					..Default::default()
+				},
+			)
+		})
+		.collect()
+}
+
 // -- Color helpers ------------------------------------------------------------
 
 fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
@@ -476,6 +586,12 @@ struct KaisekiApp {
 	source_map: Vec<lang::SourceSpan>,
 	expanded_spans: HashSet<usize>, // indices into source_map
 	focus_handle: FocusHandle,
+	/// Name of the identifier currently under the mouse cursor.  None when the
+	/// cursor is over a non-identifier token or outside the code area.
+	hovered_variable: Option<String>,
+	/// All occurrences of `hovered_variable` in the KSL source, with roles.
+	/// Recomputed each time `hovered_variable` changes.
+	var_occurrences: Vec<VarOccurrence>,
 }
 
 impl KaisekiApp {
@@ -493,6 +609,8 @@ impl KaisekiApp {
 				.collect(),
 			expanded_spans: HashSet::new(),
 			focus_handle: cx.focus_handle(),
+			hovered_variable: None,
+			var_occurrences: Vec::new(),
 		}
 	}
 
@@ -534,6 +652,51 @@ impl KaisekiApp {
 
 		rows
 	}
+
+	/// Map a window-relative mouse position to the identifier token under it,
+	/// or `None` when the cursor is not over an identifier.
+	///
+	/// Uses the fixed layout constants (title bar, panel header, gutter, row
+	/// height, approximate character width) to convert pixel coordinates into a
+	/// (display-row, byte-column) pair, then delegates to the lexer.
+	fn var_at_position(&self, position: Point<Pixels>) -> Option<String> {
+		// ── Layout constants (must match the values hard-coded in render) ────
+		const TITLE_H:   f32 = 40.0; // app title bar height
+		const HEADER_H:  f32 = 28.0; // panel_header height
+		const TOP_PAD:   f32 = 8.0;  // .py(px(8.)) on the uniform_list
+		const GUTTER_W:  f32 = 56.0; // line-number gutter width
+		const ROW_H:     f32 = 22.0; // per-row height
+		const CHAR_W:    f32 = 7.8;  // approx. character width for Consolas 13px
+
+		let rel_y = position.y.to_f64() as f32 - (TITLE_H + HEADER_H + TOP_PAD);
+		let rel_x = position.x.to_f64() as f32 - GUTTER_W;
+		if rel_x < 0.0 || rel_y < 0.0 {
+			return None;
+		}
+
+		// Correct for the current scroll offset (negative = scrolled down).
+		let absolute_y = rel_y - self.main_panel.smooth.current_y;
+		let display_row_idx = (absolute_y / ROW_H) as usize;
+
+		let display_rows = self.build_display_rows();
+		let ksl_idx = match display_rows.get(display_row_idx)? {
+			DisplayRow::KslLine { ksl_idx, .. } => *ksl_idx, // ksl_idx is &usize via match ergonomics
+			_ => return None,
+		};
+
+		let line = &self.main_panel.lines[ksl_idx];
+		let byte_col = (rel_x / CHAR_W) as usize;
+
+		for token in lang::lexer::tokenize(&line.text) {
+			if token.kind == lang::lexer::TokenKind::Ident
+				&& byte_col >= token.range.start
+				&& byte_col < token.range.end
+			{
+				return Some(line.text[token.range].to_string());
+			}
+		}
+		None
+	}
 }
 
 // -- Rendering ----------------------------------------------------------------
@@ -574,6 +737,34 @@ impl Render for KaisekiApp {
 			}
 		});
 
+		let move_listener = cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+			let new_var = this.var_at_position(event.position);
+			if new_var != this.hovered_variable {
+				this.hovered_variable = new_var.clone();
+				this.var_occurrences = match &new_var {
+					Some(name) => find_var_occurrences(name, &this.main_panel.lines),
+					None => Vec::new(),
+				};
+				cx.notify();
+			}
+		});
+
+		let hover_listener = cx.listener(|this, is_hovered: &bool, _window, cx| {
+			if !is_hovered && this.hovered_variable.is_some() {
+				this.hovered_variable = None;
+				this.var_occurrences.clear();
+				cx.notify();
+			}
+		});
+
+		// Capture hover state into Arc so it can be shared with the uniform_list
+		// closure (move) and the connection-gutter canvas closure.
+		let var_occurrences = Arc::new(self.var_occurrences.clone());
+		let var_occs_list  = Arc::clone(&var_occurrences);
+		let scroll_y       = self.main_panel.smooth.current_y;
+		// Clone display_rows before the uniform_list closure moves it.
+		let display_rows_for_canvas = Arc::clone(&display_rows);
+
 		div()
 			.size_full()
 			.flex()
@@ -603,7 +794,15 @@ impl Render for KaisekiApp {
 					.overflow_hidden()
 					.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
 					.child(
-						div().flex_1().overflow_hidden().on_scroll_wheel(scroll_listener).child(
+						div()
+						.id("ksl-content") // Stateful<Div> — required for on_hover
+						.flex_1()
+						.overflow_hidden()
+						.relative() // needed for the absolute-positioned gutter canvas
+						.on_scroll_wheel(scroll_listener)
+						.on_mouse_move(move_listener)
+						.on_hover(hover_listener)
+						.child(
 							uniform_list("ksl-rows", row_count, move |range, _window, _cx| {
 								range
 									.map(|i| match &display_rows[i] {
@@ -615,6 +814,11 @@ impl Render for KaisekiApp {
 										} => {
 											let line = &main_lines[*ksl_idx];
 											let num = format!("{:>width$}", ksl_idx + 1, width = main_gutter);
+											// Merge syntax highlights with variable-hover highlights.
+											// Syntax highlights set `color`; hover highlights set
+											// `background_color` — no field-level collision.
+											let mut combined = line.highlights.clone();
+											combined.extend(hover_highlights_for_line(&var_occs_list, *ksl_idx));
 											match span_idx {
 												Some(sidx) => {
 													let sidx = *sidx;
@@ -622,14 +826,14 @@ impl Render for KaisekiApp {
 													render_accordion_row(
 														num,
 														line.text.clone(),
-														line.highlights.clone(),
+														combined,
 														label,
 														*is_expanded,
 														move |e, w, cx| (handler[sidx])(e, w, cx),
 													)
 												}
 												None => {
-													render_code_row(num, line.text.clone(), line.highlights.clone())
+													render_code_row(num, line.text.clone(), combined)
 												}
 											}
 										}
@@ -649,7 +853,14 @@ impl Render for KaisekiApp {
 							.size_full()
 							.py(px(8.))
 							.track_scroll(main_scroll),
-						),
+						)
+						// Connection-gutter canvas: draws the vertical connecting line,
+						// role-coloured dots, and direction arrows for the hovered variable.
+						.child(connection_gutter_canvas(
+							Arc::clone(&var_occurrences),
+							scroll_y,
+							display_rows_for_canvas,
+						)),
 					),
 			)
 	}
@@ -773,6 +984,151 @@ fn render_source_snippet_row(
 				.child(num),
 		)
 		.child(StyledText::new(text).with_highlights(highlights))
+}
+
+// -- Connection-gutter canvas -------------------------------------------------
+
+/// Absolute-positioned canvas that overlays the right edge of the KSL panel
+/// and draws the variable-occurrence connection visualisation:
+///
+///   • A thin vertical line from the first to the last occurrence
+///   • A colour-coded filled dot at each occurrence
+///       Definition  →  Lavender  #b4befe
+///       Write       →  Yellow    #f9e2af
+///       Read        →  Teal      #94e2d5
+///   • A small downward-pointing arrow between consecutive occurrences to
+///     indicate the direction of data flow
+///
+/// Layout (column positions within the 12 px gutter, all x from left edge):
+///
+///   0 ──────────── 6 ──────────── 12
+///         centre at x = 6
+fn connection_gutter_canvas(
+	occurrences:  Arc<Vec<VarOccurrence>>,
+	scroll_y:     f32,
+	display_rows: Arc<Vec<DisplayRow>>,
+) -> impl IntoElement {
+	// Gutter geometry
+	const GUTTER_W: f32 = 12.0;
+	const CENTER_X: f32 = GUTTER_W / 2.0;
+
+	// Row / padding constants (must match the values in render).
+	const ROW_H:   f32 = 22.0;
+	const TOP_PAD: f32 = 8.0;
+
+	// Visual sizes
+	const DOT_R:    f32 = 3.0; // dot half-width / half-height (square, corner-rounded)
+	const LINE_W:   f32 = 2.0;
+	const ARROW_W:  f32 = 5.0;
+	const ARROW_H:  f32 = 4.0;
+
+	canvas(
+		|_bounds, _window, _cx| (),
+		move |bounds, (), window, _cx| {
+			if occurrences.is_empty() {
+				return;
+			}
+
+			let panel_h = bounds.size.height.to_f64() as f32;
+
+			// Map each occurrence to its y-centre within the canvas (panel-relative).
+			// Occurrences whose y falls outside the viewport are kept but not drawn
+			// (they still participate in the spanning line / arrow computation).
+			let positions: Vec<(f32, VarRole)> = occurrences
+				.iter()
+				.filter_map(|occ| {
+					let display_idx = display_rows.iter().position(|r| {
+						matches!(
+							r,
+							DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx
+						)
+					})?;
+					// Canvas-relative y of the row centre, adjusted for scroll.
+					let y = ROW_H * display_idx as f32 + TOP_PAD + ROW_H / 2.0 + scroll_y;
+					Some((y, occ.role))
+				})
+				.collect();
+
+			if positions.is_empty() {
+				return;
+			}
+
+			let y_first = positions.first().map(|(y, _)| *y).unwrap();
+			let y_last  = positions.last().map(|(y, _)| *y).unwrap();
+
+			// ── Spanning vertical line ────────────────────────────────────────
+			if y_first < y_last {
+				let line_y_start = y_first.max(0.0);
+				let line_y_end   = y_last.min(panel_h);
+				if line_y_start < line_y_end {
+					window.paint_quad(fill(
+						Bounds {
+							origin: point(
+								bounds.origin.x + px(CENTER_X - LINE_W / 2.0),
+								bounds.origin.y + px(line_y_start),
+							),
+							size: size(px(LINE_W), px(line_y_end - line_y_start)),
+						},
+						rgba(0x585b7088),
+					));
+				}
+			}
+
+			// ── Direction arrows between consecutive occurrences ──────────────
+			for pair in positions.windows(2) {
+				let y_mid = (pair[0].0 + pair[1].0) / 2.0;
+				if y_mid < 0.0 || y_mid > panel_h {
+					continue;
+				}
+
+				// Downward-pointing triangle.
+				let ax = bounds.origin.x + px(CENTER_X);
+				let ay = bounds.origin.y + px(y_mid);
+
+				let mut pb = PathBuilder::fill();
+				pb.move_to(point(ax - px(ARROW_W / 2.0), ay - px(ARROW_H / 2.0)));
+				pb.line_to(point(ax + px(ARROW_W / 2.0), ay - px(ARROW_H / 2.0)));
+				pb.line_to(point(ax,                      ay + px(ARROW_H / 2.0)));
+				pb.close();
+
+				if let Ok(path) = pb.build() {
+					window.paint_path(path, rgba(0x585b70cc));
+				}
+			}
+
+			// ── Role-coloured dots ────────────────────────────────────────────
+			for (y, role) in &positions {
+				if *y < -DOT_R || *y > panel_h + DOT_R {
+					continue;
+				}
+
+				let dot_color: Hsla = match role {
+					VarRole::Definition => rgba(0xb4befeff).into(),
+					VarRole::Write      => rgba(0xf9e2afff).into(),
+					VarRole::Read       => rgba(0x94e2d5ff).into(),
+				};
+
+				window.paint_quad(
+					fill(
+						Bounds {
+							origin: point(
+								bounds.origin.x + px(CENTER_X - DOT_R),
+								bounds.origin.y + px(y - DOT_R),
+							),
+							size: size(px(DOT_R * 2.0), px(DOT_R * 2.0)),
+						},
+						dot_color,
+					)
+					.corner_radii(px(DOT_R)),
+				);
+			}
+		},
+	)
+	.absolute()
+	.right(px(0.))
+	.top(px(0.))
+	.w(px(GUTTER_W))
+	.h_full()
 }
 
 // -- Entry point --------------------------------------------------------------
