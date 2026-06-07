@@ -768,6 +768,8 @@ impl Render for KaisekiApp {
 		let scroll_y       = self.main_panel.smooth.current_y;
 		// Clone display_rows before the uniform_list closure moves it.
 		let display_rows_for_canvas = Arc::clone(&display_rows);
+		// KSL lines needed to compute per-line text-end x position for leader lines.
+		let lines_for_canvas = self.main_panel.lines.clone();
 
 		div()
 			.size_full()
@@ -856,12 +858,13 @@ impl Render for KaisekiApp {
 							.py(px(8.))
 							.track_scroll(main_scroll),
 						)
-						// Connection-gutter canvas: draws the vertical connecting line,
-						// role-coloured dots, and direction arrows for the hovered variable.
+						// Connection-gutter canvas: leader lines from text-end, dots, rail,
+						// and arrows.  Full-width overlay so leader lines start at line-end.
 						.child(connection_gutter_canvas(
 							Arc::clone(&var_occurrences),
 							scroll_y,
 							display_rows_for_canvas,
+							lines_for_canvas,
 						)),
 					),
 			)
@@ -990,47 +993,54 @@ fn render_source_snippet_row(
 
 // -- Connection-gutter canvas -------------------------------------------------
 
-/// Absolute-positioned canvas that overlays the right edge of the KSL panel.
+/// Full-width transparent overlay canvas that draws the variable-occurrence
+/// connection visualisation.
 ///
-/// Visual layout within the 40 px canvas (x measured from canvas left edge):
+/// Because the canvas spans the entire panel width, leader lines can start
+/// exactly at the end of each occurrence's line text.
 ///
-///   0          20         40
-///   │←leader──→●          │
-///   │           │          │  ← rail (vertical bar)
-///   │←leader──→●          │
-///   │           │          │
-///   │←leader──→●          │
-///   │                      │
+/// Layout (panel-relative x, y = 0 at panel top):
 ///
-///   leader  : 1 px tall horizontal line anchoring each dot to the code side
+///   │←── gutter 56 px ──→│←── code text ──────────→│ DOT_FROM_RIGHT │
+///   │                     │                          │                │
+///   │                     │ let local_90 = …        ├───────────────●│ def
+///   │                     │                          │               ││
+///   │                     │ local_90 = val;          ├──────────────●│ write
+///   │                     │                          │               ││
+///   │                     │ foo(local_90)            ├─────────────●─┘ read
+///
+///   leader  : 1 px horizontal line from (text_end + gap) to (dot - gap)
 ///   ●       : 6×6 px rounded dot, colour-coded by role
-///               Definition  →  Lavender  #b4befe
-///               Write       →  Yellow    #f9e2af
-///               Read        →  Teal      #94e2d5
-///   rail    : 2 px wide vertical bar connecting first ↔ last occurrence
-///   arrows  : small downward triangles between consecutive dots (data-flow direction)
+///   rail    : 2 px vertical bar connecting first ↔ last occurrence
+///   arrow   : small downward triangle between consecutive dots
 fn connection_gutter_canvas(
 	occurrences:  Arc<Vec<VarOccurrence>>,
 	scroll_y:     f32,
 	display_rows: Arc<Vec<DisplayRow>>,
+	lines:        Arc<Vec<HighlightedLine>>,
 ) -> impl IntoElement {
-	// ── Canvas geometry ───────────────────────────────────────────────────────
+	// ── Geometry ──────────────────────────────────────────────────────────────
 	//
-	//   CANVAS_W   total canvas width (px)
-	//   RAIL_X     x-centre of the rail and dots, measured from canvas.left
-	//   LEADER_X0  x at which the leader line starts (left end)
+	// The dot column is anchored DOT_FROM_RIGHT px from the panel's right edge.
+	// Leader lines start just after the last character of the occurrence's line
+	// and end just before the dot's left edge.
 	//
-	const CANVAS_W:  f32 = 40.0;
-	const RAIL_X:    f32 = 20.0; // centre of dots: 20 px from right edge
-	const LEADER_X0: f32 = 0.0;  // leader starts at the canvas left boundary
+	//   dot_x (canvas-relative) = bounds.size.width - DOT_FROM_RIGHT
+	//
+	const DOT_FROM_RIGHT: f32 = 16.0; // dot-centre distance from panel right edge
+	const LEADER_GAP:     f32 = 6.0;  // gap between text end / dot edge and leader
 
-	// Row / padding constants (must match the values in render).
+	// Text layout constants (must mirror render / var_at_position).
+	const GUTTER_W: f32 = 56.0;
+	const CHAR_W:   f32 = 7.8; // approx. Consolas 13 px glyph advance
+
+	// Row layout (must match render).
 	const ROW_H:   f32 = 22.0;
 	const TOP_PAD: f32 = 8.0;
 
-	// Visual sizes
-	const DOT_R:   f32 = 3.0; // dot half-size (square with rounded corners)
-	const LINE_W:  f32 = 2.0; // vertical rail width
+	// Visual sizes.
+	const DOT_R:   f32 = 3.0;
+	const LINE_W:  f32 = 2.0;
 	const ARROW_W: f32 = 5.0;
 	const ARROW_H: f32 = 4.0;
 
@@ -1042,11 +1052,17 @@ fn connection_gutter_canvas(
 			}
 
 			let panel_h = bounds.size.height.to_f64() as f32;
+			let panel_w = bounds.size.width.to_f64() as f32;
 
-			// Map each occurrence to its canvas-relative y-centre, corrected for
-			// the current scroll offset.  Out-of-viewport occurrences are kept in
-			// the list so they participate in the spanning rail computation.
-			let positions: Vec<(f32, VarRole)> = occurrences
+			// Fixed dot-column x, canvas-relative.
+			let dot_x = panel_w - DOT_FROM_RIGHT;
+
+			// Build a list of (canvas-relative y, role, line_text_len) for every
+			// occurrence.  Out-of-viewport rows are kept so they participate in
+			// the spanning rail.
+			struct Entry { y: f32, role: VarRole, text_len: usize }
+
+			let entries: Vec<Entry> = occurrences
 				.iter()
 				.filter_map(|occ| {
 					let display_idx = display_rows.iter().position(|r| {
@@ -1056,29 +1072,30 @@ fn connection_gutter_canvas(
 						)
 					})?;
 					let y = ROW_H * display_idx as f32 + TOP_PAD + ROW_H / 2.0 + scroll_y;
-					Some((y, occ.role))
+					let text_len = lines.get(occ.ksl_line_idx).map(|l| l.text.len()).unwrap_or(0);
+					Some(Entry { y, role: occ.role, text_len })
 				})
 				.collect();
 
-			if positions.is_empty() {
+			if entries.is_empty() {
 				return;
 			}
 
-			let y_first = positions.first().map(|(y, _)| *y).unwrap();
-			let y_last  = positions.last().map(|(y, _)| *y).unwrap();
+			let y_first = entries.first().map(|e| e.y).unwrap();
+			let y_last  = entries.last().map(|e| e.y).unwrap();
 
 			// ── Vertical spanning rail ────────────────────────────────────────
 			if y_first < y_last {
-				let rail_y_start = y_first.max(0.0);
-				let rail_y_end   = y_last.min(panel_h);
-				if rail_y_start < rail_y_end {
+				let ry0 = y_first.max(0.0);
+				let ry1 = y_last.min(panel_h);
+				if ry0 < ry1 {
 					window.paint_quad(fill(
 						Bounds {
 							origin: point(
-								bounds.origin.x + px(RAIL_X - LINE_W / 2.0),
-								bounds.origin.y + px(rail_y_start),
+								bounds.origin.x + px(dot_x - LINE_W / 2.0),
+								bounds.origin.y + px(ry0),
 							),
-							size: size(px(LINE_W), px(rail_y_end - rail_y_start)),
+							size: size(px(LINE_W), px(ry1 - ry0)),
 						},
 						rgba(0x585b7088),
 					));
@@ -1086,12 +1103,12 @@ fn connection_gutter_canvas(
 			}
 
 			// ── Direction arrows between consecutive occurrences ──────────────
-			for pair in positions.windows(2) {
-				let y_mid = (pair[0].0 + pair[1].0) / 2.0;
+			for pair in entries.windows(2) {
+				let y_mid = (pair[0].y + pair[1].y) / 2.0;
 				if y_mid < 0.0 || y_mid > panel_h {
 					continue;
 				}
-				let ax = bounds.origin.x + px(RAIL_X);
+				let ax = bounds.origin.x + px(dot_x);
 				let ay = bounds.origin.y + px(y_mid);
 
 				let mut pb = PathBuilder::fill();
@@ -1105,29 +1122,31 @@ fn connection_gutter_canvas(
 			}
 
 			// ── Leader lines + role-coloured dots ─────────────────────────────
-			for (y, role) in &positions {
-				if *y < -DOT_R || *y > panel_h + DOT_R {
+			for entry in &entries {
+				if entry.y < -DOT_R || entry.y > panel_h + DOT_R {
 					continue;
 				}
 
-				// Horizontal leader line from the canvas left edge to the dot.
-				// Painted before the dot so the dot renders on top.
-				let leader_end_x = RAIL_X - DOT_R - 1.0; // 1 px gap before dot edge
-				if leader_end_x > LEADER_X0 {
+				// Leader line: from just after text end to just before the dot.
+				let text_end_x  = GUTTER_W + entry.text_len as f32 * CHAR_W;
+				let leader_x0   = text_end_x + LEADER_GAP;
+				let leader_x1   = dot_x - DOT_R - LEADER_GAP;
+
+				if leader_x1 > leader_x0 {
 					window.paint_quad(fill(
 						Bounds {
 							origin: point(
-								bounds.origin.x + px(LEADER_X0),
-								bounds.origin.y + px(y - 0.5),
+								bounds.origin.x + px(leader_x0),
+								bounds.origin.y + px(entry.y - 0.5),
 							),
-							size: size(px(leader_end_x - LEADER_X0), px(1.0)),
+							size: size(px(leader_x1 - leader_x0), px(1.0)),
 						},
 						rgba(0x585b7066),
 					));
 				}
 
 				// Role dot.
-				let dot_color: Hsla = match role {
+				let dot_color: Hsla = match entry.role {
 					VarRole::Definition => rgba(0xb4befeff).into(),
 					VarRole::Write      => rgba(0xf9e2afff).into(),
 					VarRole::Read       => rgba(0x94e2d5ff).into(),
@@ -1136,8 +1155,8 @@ fn connection_gutter_canvas(
 					fill(
 						Bounds {
 							origin: point(
-								bounds.origin.x + px(RAIL_X - DOT_R),
-								bounds.origin.y + px(y - DOT_R),
+								bounds.origin.x + px(dot_x - DOT_R),
+								bounds.origin.y + px(entry.y - DOT_R),
 							),
 							size: size(px(DOT_R * 2.0), px(DOT_R * 2.0)),
 						},
@@ -1149,9 +1168,9 @@ fn connection_gutter_canvas(
 		},
 	)
 	.absolute()
+	.left(px(0.))
 	.right(px(0.))
 	.top(px(0.))
-	.w(px(CANVAS_W))
 	.h_full()
 }
 
