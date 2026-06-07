@@ -1,5 +1,4 @@
-pub mod ast;
-pub mod render;
+pub mod lexer;
 
 use std::ops::Range;
 
@@ -18,15 +17,24 @@ pub struct SourceSpan {
 /// Hand-authored source map for the sample KSL / C pair.
 /// In production the LLM writes this alongside the KSL it generates.
 pub const SAMPLE_SOURCE_MAP: &[SourceSpan] = &[
-	SourceSpan { label: "acquire stream",         ksl_trigger_line: 52, source_lines: 33..54 },
-	SourceSpan { label: "resolve time",           ksl_trigger_line: 62, source_lines: 54..83 },
-	SourceSpan { label: "key-frame data",         ksl_trigger_line: 75, source_lines: 83..185 },
+	SourceSpan {
+		label: "acquire stream",
+		ksl_trigger_line: 52,
+		source_lines: 33..54,
+	},
+	SourceSpan {
+		label: "resolve time",
+		ksl_trigger_line: 62,
+		source_lines: 54..83,
+	},
+	SourceSpan {
+		label: "key-frame data",
+		ksl_trigger_line: 75,
+		source_lines: 83..185,
+	},
 ];
 
 /// KSL (Kaiseki Script Language) — lifted rendering of NIM_GetStreamFPV.
-///
-/// This demonstrates the language by hand-writing the high-level form.
-/// Future tooling will generate KSL from the AST via `render::render_document`.
 pub const SAMPLE_KSL: &str = "// KSL — Kaiseki Script Language
 // A high-level pseudocode notation for decompiled binary analysis.
 //

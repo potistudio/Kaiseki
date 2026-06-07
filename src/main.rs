@@ -224,6 +224,27 @@ struct Panel {
 }
 
 impl Panel {
+	/// Build a panel from KSL source using the built-in KSL lexer.
+	fn from_ksl(source: &str) -> Self {
+		let lines = source
+			.lines()
+			.map(|line| HighlightedLine {
+				text: line.to_string().into(),
+				highlights: ksl_highlight_line(line),
+			})
+			.collect();
+		Self {
+			lines: Arc::new(lines),
+			scroll_handle: UniformListScrollHandle::new(),
+			smooth: SmoothScroll {
+				current_y: 0.0,
+				target_y: 0.0,
+				animating: false,
+			},
+		}
+	}
+
+	/// Build a panel from arbitrary source using syntect for highlighting.
 	fn from_code(code: &str, lang_ext: &str) -> Self {
 		let ss = SyntaxSet::load_defaults_newlines();
 		let ts = ThemeSet::load_defaults();
@@ -271,16 +292,70 @@ impl Panel {
 					highlights.retain(|(r, _)| r.start < r.end);
 				}
 
-				HighlightedLine { text: text.into(), highlights }
+				HighlightedLine {
+					text: text.into(),
+					highlights,
+				}
 			})
 			.collect();
 
 		Self {
 			lines: Arc::new(lines),
 			scroll_handle: UniformListScrollHandle::new(),
-			smooth: SmoothScroll { current_y: 0.0, target_y: 0.0, animating: false },
+			smooth: SmoothScroll {
+				current_y: 0.0,
+				target_y: 0.0,
+				animating: false,
+			},
 		}
 	}
+}
+
+// -- KSL syntax highlighting --------------------------------------------------
+
+// Catppuccin Mocha palette — matched to KSL token roles.
+//
+//   Token role    Color name   Hex
+//   ────────────  ───────────  ──────────
+//   Keyword       Mauve        #cba6f7
+//   Atom          Peach        #fab387
+//   Number/Offset Yellow       #f9e2af
+//   DocComment    Green        #a6e3a1
+//   SectionSep    Sapphire     #74c7ec  (dimmed)
+//   Comment       Overlay0     #6c7086
+//   Operator      Sky          #89dceb
+//   Punct         Subtext1     #bac2de
+//   Ident         Text         #cdd6f4
+
+fn ksl_highlight_line(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
+	use lang::lexer::TokenKind;
+	lang::lexer::tokenize(line)
+		.into_iter()
+		.filter_map(|token| {
+			let color: Option<Hsla> = match token.kind {
+				TokenKind::Keyword => Some(rgba(0xcba6f7ff).into()),
+				TokenKind::Atom => Some(rgba(0xfab387ff).into()),
+				TokenKind::Number | TokenKind::Offset => Some(rgba(0xf9e2afff).into()),
+				TokenKind::DocComment => Some(rgba(0xa6e3a1ff).into()),
+				TokenKind::SectionSep => Some(rgba(0x74c7ec99).into()),
+				TokenKind::Comment => Some(rgba(0x6c7086ff).into()),
+				TokenKind::Operator => Some(rgba(0x89dcebff).into()),
+				TokenKind::Punct => Some(rgba(0xbac2deff).into()),
+				TokenKind::Ident => Some(rgba(0xcdd6f4ff).into()),
+				// Whitespace and unknown bytes carry no highlight.
+				TokenKind::Whitespace | TokenKind::Unknown => None,
+			};
+			color.map(|c| {
+				(
+					token.range,
+					HighlightStyle {
+						color: Some(c),
+						..Default::default()
+					},
+				)
+			})
+		})
+		.collect()
 }
 
 // -- Color helpers ------------------------------------------------------------
@@ -317,11 +392,7 @@ fn advance_smooth_scroll(panel: &mut Panel, window: &mut Window) {
 
 /// Process a scroll-wheel event for one panel.
 /// Returns `true` when a re-render should be requested via `cx.notify()`.
-fn handle_panel_scroll(
-	panel: &mut Panel,
-	event: &ScrollWheelEvent,
-	window: &mut Window,
-) -> bool {
+fn handle_panel_scroll(panel: &mut Panel, event: &ScrollWheelEvent, window: &mut Window) -> bool {
 	let actual_y = panel.scroll_handle.0.borrow().base_handle.offset().y.to_f64() as f32;
 
 	if event.delta.precise() {
@@ -342,8 +413,7 @@ fn handle_panel_scroll(
 
 	panel.smooth.target_y += delta_y;
 	if let Some(size) = panel.scroll_handle.0.borrow().last_item_size {
-		let max_neg =
-			-(size.contents.height.to_f64() - size.item.height.to_f64()).max(0.0) as f32;
+		let max_neg = -(size.contents.height.to_f64() - size.item.height.to_f64()).max(0.0) as f32;
 		panel.smooth.target_y = panel.smooth.target_y.max(max_neg).min(0.0);
 	}
 
@@ -353,11 +423,7 @@ fn handle_panel_scroll(
 
 // -- Code row element ---------------------------------------------------------
 
-fn render_code_row(
-	num: String,
-	text: SharedString,
-	highlights: Vec<(Range<usize>, HighlightStyle)>,
-) -> Div {
+fn render_code_row(num: String, text: SharedString, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Div {
 	div()
 		.h(px(22.))
 		.flex()
@@ -392,7 +458,12 @@ fn render_code_row(
 enum DisplayRow {
 	/// A normal KSL code line.  When `span_idx` is Some this line also shows
 	/// the accordion toggle button (it is the section-header comment line).
-	KslLine { ksl_idx: usize, span_idx: Option<usize>, is_expanded: bool, label: &'static str },
+	KslLine {
+		ksl_idx: usize,
+		span_idx: Option<usize>,
+		is_expanded: bool,
+		label: &'static str,
+	},
 	/// A decompiled-C line revealed by an open accordion entry.
 	SourceLine { source_idx: usize, is_last: bool },
 }
@@ -400,8 +471,8 @@ enum DisplayRow {
 // -- Top-level view -----------------------------------------------------------
 
 struct KaisekiApp {
-	main_panel: Panel,              // KSL lifted pseudocode (primary view)
-	source_panel: Panel,            // decompiled C (accordion snippets)
+	main_panel: Panel,   // KSL lifted pseudocode (primary view)
+	source_panel: Panel, // decompiled C (accordion snippets)
 	source_map: Vec<lang::SourceSpan>,
 	expanded_spans: HashSet<usize>, // indices into source_map
 	focus_handle: FocusHandle,
@@ -410,7 +481,7 @@ struct KaisekiApp {
 impl KaisekiApp {
 	fn new(cx: &mut Context<Self>) -> Self {
 		Self {
-			main_panel: Panel::from_code(lang::SAMPLE_KSL, "rs"),
+			main_panel: Panel::from_ksl(lang::SAMPLE_KSL),
 			source_panel: Panel::from_code(SAMPLE_CODE, "cpp"),
 			source_map: lang::SAMPLE_SOURCE_MAP
 				.iter()
@@ -433,24 +504,29 @@ impl KaisekiApp {
 		let mut rows = Vec::with_capacity(ksl_count);
 
 		for ksl_idx in 0..ksl_count {
-			let span_idx = self
-				.source_map
-				.iter()
-				.position(|s| s.ksl_trigger_line == ksl_idx);
+			let span_idx = self.source_map.iter().position(|s| s.ksl_trigger_line == ksl_idx);
 
 			let (is_expanded, label) = match span_idx {
 				Some(si) => (self.expanded_spans.contains(&si), self.source_map[si].label),
 				None => (false, ""),
 			};
 
-			rows.push(DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label });
+			rows.push(DisplayRow::KslLine {
+				ksl_idx,
+				span_idx,
+				is_expanded,
+				label,
+			});
 
 			if let Some(si) = span_idx {
 				if self.expanded_spans.contains(&si) {
 					let range = self.source_map[si].source_lines.clone();
 					let last = range.end.saturating_sub(1);
 					for source_idx in range {
-						rows.push(DisplayRow::SourceLine { source_idx, is_last: source_idx == last });
+						rows.push(DisplayRow::SourceLine {
+							source_idx,
+							is_last: source_idx == last,
+						});
 					}
 				}
 			}
@@ -469,7 +545,7 @@ impl Render for KaisekiApp {
 		let display_rows = Arc::new(self.build_display_rows());
 		let row_count = display_rows.len();
 
-		let main_lines  = self.main_panel.lines.clone();
+		let main_lines = self.main_panel.lines.clone();
 		let source_lines = self.source_panel.lines.clone();
 		let main_scroll = self.main_panel.scroll_handle.clone();
 		let main_gutter = self.main_panel.lines.len().to_string().len();
@@ -478,8 +554,7 @@ impl Render for KaisekiApp {
 		// One toggle listener per source-map span, built before the element tree.
 		// Using MouseDownEvent instead of ClickEvent — on_mouse_down is on InteractiveElement
 		// and works on plain Div without needing .id() / StatefulInteractiveElement.
-		let mut toggle_fns: Vec<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>> =
-			Vec::new();
+		let mut toggle_fns: Vec<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>> = Vec::new();
 		for sidx in 0..self.source_map.len() {
 			let f = cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
 				if this.expanded_spans.contains(&sidx) {
@@ -528,77 +603,53 @@ impl Render for KaisekiApp {
 					.overflow_hidden()
 					.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
 					.child(
-						div()
-							.flex_1()
-							.overflow_hidden()
-							.on_scroll_wheel(scroll_listener)
-							.child(
-								uniform_list(
-									"ksl-rows",
-									row_count,
-									move |range, _window, _cx| {
-										range
-											.map(|i| match &display_rows[i] {
-												DisplayRow::KslLine {
-													ksl_idx,
-													span_idx,
-													is_expanded,
-													label,
-												} => {
-													let line = &main_lines[*ksl_idx];
-													let num = format!(
-														"{:>width$}",
-														ksl_idx + 1,
-														width = main_gutter
-													);
-													match span_idx {
-														Some(sidx) => {
-															let sidx = *sidx;
-															let handler =
-																Arc::clone(&toggle_fns);
-																					render_accordion_row(
-																num,
-																line.text.clone(),
-																line.highlights.clone(),
-																label,
-																*is_expanded,
-																move |e, w, cx| {
-																	(handler[sidx])(e, w, cx)
-																},
-															)
-														}
-														None => render_code_row(
-															num,
-															line.text.clone(),
-															line.highlights.clone(),
-														),
-													}
-												}
-												DisplayRow::SourceLine {
-													source_idx,
-													is_last,
-												} => {
-													let line = &source_lines[*source_idx];
-													let num = format!(
-														"{:>width$}",
-														source_idx + 1,
-														width = source_gutter
-													);
-													render_source_snippet_row(
+						div().flex_1().overflow_hidden().on_scroll_wheel(scroll_listener).child(
+							uniform_list("ksl-rows", row_count, move |range, _window, _cx| {
+								range
+									.map(|i| match &display_rows[i] {
+										DisplayRow::KslLine {
+											ksl_idx,
+											span_idx,
+											is_expanded,
+											label,
+										} => {
+											let line = &main_lines[*ksl_idx];
+											let num = format!("{:>width$}", ksl_idx + 1, width = main_gutter);
+											match span_idx {
+												Some(sidx) => {
+													let sidx = *sidx;
+													let handler = Arc::clone(&toggle_fns);
+													render_accordion_row(
 														num,
 														line.text.clone(),
 														line.highlights.clone(),
-														*is_last,
+														label,
+														*is_expanded,
+														move |e, w, cx| (handler[sidx])(e, w, cx),
 													)
 												}
-											})
-											.collect::<Vec<_>>()
-									},
-								)
-								.size_full()
-								.py(px(8.))
-								.track_scroll(main_scroll),
-							),
+												None => {
+													render_code_row(num, line.text.clone(), line.highlights.clone())
+												}
+											}
+										}
+										DisplayRow::SourceLine { source_idx, is_last } => {
+											let line = &source_lines[*source_idx];
+											let num = format!("{:>width$}", source_idx + 1, width = source_gutter);
+											render_source_snippet_row(
+												num,
+												line.text.clone(),
+												line.highlights.clone(),
+												*is_last,
+											)
+										}
+									})
+									.collect::<Vec<_>>()
+							})
+							.size_full()
+							.py(px(8.))
+							.track_scroll(main_scroll),
+						),
 					),
 			)
 	}
@@ -737,13 +788,13 @@ fn main() {
 		};
 
 		app.open_window(options, |window, cx| {
-				let entity = cx.new(KaisekiApp::new);
-				// Give the root view keyboard focus so Tab events are captured.
-				let focus_handle = entity.read(cx).focus_handle.clone();
-				window.focus(&focus_handle);
-				entity
-			})
-			.expect("Failed to open window");
+			let entity = cx.new(KaisekiApp::new);
+			// Give the root view keyboard focus so Tab events are captured.
+			let focus_handle = entity.read(cx).focus_handle.clone();
+			window.focus(&focus_handle);
+			entity
+		})
+		.expect("Failed to open window");
 		app.activate(true);
 	});
 }
