@@ -144,7 +144,7 @@ i32  i64  u32  u64  bool  void  Time  HResult  KfcInfo  BEE_Layer
 
 ```
 *T         raw pointer to T
-*T?        nullable raw pointer to T   (preferred over *mut Option<T>)
+?*T        nullable raw pointer to T   (preferred over *mut Option<T>)
 ```
 
 A bare `*T` (without `?`) expresses that the pointer is **assumed non-null** at the point of use. Append `?` to acknowledge nullability.
@@ -158,16 +158,24 @@ A bare `*T` (without `?`) expresses that the pointer is **assumed non-null** at 
 
 Use references only when the original C++ signature uses const ref (`const T &`). Otherwise use `*T`.
 
-### 4.4 Nullable annotation `T?`
+### 4.4 Nullable annotation `?*T` / `T?`
 
-The `?` postfix applied to any type means "this value may be null / absent".
+The `?` prefix on a pointer type means "this pointer may be null".
 
 ```
-*Stream?       // pointer that may be null
-*KfcInfo?      // pointer that may be null
+?*Stream       // pointer that may be null
+?*KfcInfo      // pointer that may be null
 ```
 
-`T?` is a type-level annotation only. It does not imply any runtime wrapping.
+The `?` postfix on a non-pointer named type means "this value may be absent".
+
+```
+Result?        // nullable value type (rare in decompiled C)
+```
+
+**Rule:** Always write `?*T` for nullable pointers (prefix form). Reserve postfix `T?` for non-pointer types only. This avoids ambiguity between `*(T?)` and `(*T)?`.
+
+These are type-level annotations only. They do not imply any runtime wrapping.
 
 ### 4.5 Tuple types
 
@@ -214,13 +222,15 @@ Used to document the underlying type of opaque names.
 Declares the memory layout of a C++ class or struct. Only fields that are referenced in the translated function need to be listed.
 
 ```
-struct Name {
+struct Name [: InterfaceName] {
     [@offset]  field_name:  Type[,  // optional comment]
     ...
 }
 ```
 
 **`@offset`** is a hex integer (e.g., `@0x0290`) giving the byte offset of the field from the start of the struct. It is optional when the offset is unknown or irrelevant.
+
+**`: InterfaceName`** (optional) — declares which `virtual interface` describes this struct's vtable. Write it when the binding is known. Omit when the vtable layout is undetermined.
 
 **Formatting rule:** Column-align the field names and type annotations across all fields in the struct. Use enough spaces after `@0xNNNN` to reach column 10 from the start of the field (see examples).
 
@@ -232,10 +242,10 @@ struct BEE_Layer {
 
 struct KfcInfo {
 	@0x00  value:      i32,    // interpolated value
-	@0x08  ease_in:    *KfcInfo?,
-	@0x10  ease_out:   *KfcInfo?,
-	@0x18  tangent_in: *KfcInfo?,
-	@0x1c  tangent_out: *KfcInfo?,
+	@0x08  ease_in:    ?*KfcInfo,
+	@0x10  ease_out:   ?*KfcInfo,
+	@0x18  tangent_in: ?*KfcInfo,
+	@0x1c  tangent_out: ?*KfcInfo,
 	@0x24  key_index:  i32,
 	@0x28  is_hold:    bool,
 	@0x29  is_prev_hold: bool,
@@ -268,7 +278,7 @@ virtual interface Stream {
 	@0x0170  fn is_parametric(self)                                          -> bool,
 	         fn has_keys(self)                                               -> bool,
 	         fn get_value(self, time: Time, raw: bool,
-	                      unused: *void, out: *KfcInfo, bag: *ParamBag?)    -> HResult,
+	                      unused: *void, out: *KfcInfo, bag: ?*ParamBag)    -> HResult,
 	         fn time_to_index(self, time: Time, out: *i32)                  -> HResult,
 	         fn get_key(self, index: i32, unused: *void,
 	                    prev_hold: *bool, next_hold: *bool)                 -> HResult,
@@ -304,11 +314,11 @@ fn get_stream_fpv(
 	layer:       *BEE_Layer,
 	path:        &StreamIDPath,
 	mode:        i32,
-	comp_time:   *Time?,         // null = use current playhead
-	layer_time:  *Time?,         // null = derived from comp_time
+	comp_time:   ?*Time,         // null = use current playhead
+	layer_time:  ?*Time,         // null = derived from comp_time
 	out_fpv:     *StreamFPV,
-	out_kfc:     *KfcInfo?,      // null = skip KFC computation
-	stream:      *Stream?,       // null = auto-lookup from layer + path
+	out_kfc:     ?*KfcInfo,      // null = skip KFC computation
+	stream:      ?*Stream,       // null = auto-lookup from layer + path
 ) throws {
 	...
 }
@@ -456,13 +466,22 @@ Use parentheses freely to clarify intent.
 | `expr.field` | Access field of a value-type (stack-allocated) |
 | `expr->field` | Access field through a pointer |
 | `expr->method(args)` | Call virtual or pointer-based method |
+| `expr->@offset` | Access field at raw byte offset (before struct layout is declared) |
 | `expr[index]` | Index access |
 
-**Pointer arithmetic** — when offset-based access remains unresolved, write it explicitly:
+**`->@offset` — raw offset access (temporary form)**
+
+Used when the struct layout is not yet declared. Once the field is named in a `struct` definition, replace with `->field_name`.
 
 ```
-out_kfc + 0x08          // pointer arithmetic; document with a comment
-*(out_kfc + 0x08)       // dereference at offset
+out_kfc->@0x18          // temporary: field at byte offset 0x18
+out_kfc->tangent_in     // after struct is declared
+```
+
+**Pointer arithmetic** — only when `->@offset` is not expressive enough (e.g., the result is passed by address):
+
+```
+&(out_kfc->@0x18)       // address of the field at offset 0x18
 ```
 
 ---
@@ -545,7 +564,7 @@ if (param_7 == (FEE_KfcInfo *)0x0) {
 **Rules:**
 - Only `return` is allowed in the `else` branch (no custom expressions).
 - The bound `name` shadows any outer variable of the same name; use a different name if shadowing is unwanted.
-- The expression must be of nullable type `T?`; `name` has type `*T` (non-nullable).
+- The expression must be of nullable pointer type `?*T`; `name` has type `*T` (non-nullable).
 
 **Example:**
 ```
@@ -778,9 +797,9 @@ Steps:
 2. Declare the field in the struct: `@0x0290  item: *BEE_Item`.
 3. Write `layer->item`.
 
-If the struct layout is unknown or partially known:
+If the struct layout is unknown or partially known, use `->@offset`:
 ```
-*(param_1 + 0x290) as *BEE_Item    // @BEE_Layer+0x290
+param_1->@0x290 as *BEE_Item    // @BEE_Layer+0x290 — replace once field is named
 ```
 
 ---
@@ -964,7 +983,7 @@ item         = comment
 
 type_alias   = doc_comment* "type" IDENT "=" type ";" ;
 
-struct_def   = doc_comment* "struct" IDENT "{" field_def* "}" ;
+struct_def   = doc_comment* "struct" IDENT (":" IDENT)? "{" field_def* "}" ;
 field_def    = ("@" HEX_LIT)? IDENT ":" type "," comment? NEWLINE ;
 
 interface_def = "virtual" "interface" IDENT "{" virtual_method* "}" ;
@@ -978,9 +997,10 @@ param        = IDENT ":" type ;
 (* ── Types ── *)
 
 type         = "*" type                  (* pointer *)
+             | "?" "*" type              (* nullable pointer *)
              | "&" type                  (* reference *)
              | "&" "mut" type            (* mutable reference *)
-             | type "?"                  (* nullable *)
+             | type "?"                  (* nullable value type — non-pointer only *)
              | "(" type ("," type)* ")"  (* tuple *)
              | "()"                      (* unit *)
              | IDENT                     (* named type *)
@@ -1022,6 +1042,7 @@ expr         = expr "!"                            (* throw on error, postfix *)
              | unary_op expr
              | expr "->" IDENT                     (* pointer field *)
              | expr "->" IDENT "(" call_args ")"   (* pointer method call *)
+             | expr "->" "@" HEX_LIT               (* raw offset field access — temporary *)
              | expr "." IDENT                      (* value field *)
              | expr "[" expr "]"                   (* index *)
              | IDENT "(" call_args ")"             (* free function call *)
@@ -1104,7 +1125,7 @@ virtual interface Stream {
 	@0x0170  fn is_parametric(self)                                          -> bool,
 	         fn has_keys(self)                                               -> bool,
 	         fn get_value(self, time: Time, raw: bool,
-	                      unused: *void, out: *KfcInfo, bag: *ParamBag?)    -> HResult,
+	                      unused: *void, out: *KfcInfo, bag: ?*ParamBag)    -> HResult,
 	         fn time_to_index(self, time: Time, out: *i32)                  -> HResult,
 	         fn get_key(self, index: i32, unused: *void,
 	                    prev_hold: *bool, next_hold: *bool)                 -> HResult,
@@ -1122,11 +1143,11 @@ fn get_stream_fpv(
 	layer:       *BEE_Layer,
 	path:        &StreamIDPath,
 	mode:        i32,
-	comp_time:   *Time?,         // null = use current playhead
-	layer_time:  *Time?,         // null = derived from comp_time
+	comp_time:   ?*Time,         // null = use current playhead
+	layer_time:  ?*Time,         // null = derived from comp_time
 	out_fpv:     *StreamFPV,
-	out_kfc:     *KfcInfo?,      // null = skip KFC computation
-	stream:      *Stream?,       // null = auto-lookup from layer + path
+	out_kfc:     ?*KfcInfo,      // null = skip KFC computation
+	stream:      ?*Stream,       // null = auto-lookup from layer + path
 ) throws {
 
 	// ── acquire stream ──────────────────────────────────────────────────
@@ -1160,10 +1181,10 @@ fn get_stream_fpv(
 
 		if stream->has_keys() {
 			// Neighbor-key easing — null pointer means "skip this component"
-			var ease_in:     *KfcInfo? = if *out_kfc          != null { out_kfc + 0x08 } else { null }
-			var ease_out:    *KfcInfo? = if *(out_kfc + 0x10) != null { out_kfc + 0x10 } else { null }
-			var tangent_in:  *KfcInfo? = if *(out_kfc + 0x18) != null { out_kfc + 0x18 } else { null }
-			var tangent_out: *KfcInfo? = if *(out_kfc + 0x1c) != null { out_kfc + 0x1c } else { null }
+			var ease_in:     ?*KfcInfo = if *out_kfc          != null { out_kfc + 0x08 } else { null }
+			var ease_out:    ?*KfcInfo = if *(out_kfc + 0x10) != null { out_kfc + 0x10 } else { null }
+			var tangent_in:  ?*KfcInfo = if *(out_kfc + 0x18) != null { out_kfc + 0x18 } else { null }
+			var tangent_out: ?*KfcInfo = if *(out_kfc + 0x1c) != null { out_kfc + 0x1c } else { null }
 
 			if layer != null {
 				var current_time: Time = default
