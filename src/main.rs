@@ -586,11 +586,11 @@ struct KaisekiApp {
 	source_map: Vec<lang::SourceSpan>,
 	expanded_spans: HashSet<usize>, // indices into source_map
 	focus_handle: FocusHandle,
-	/// Name of the identifier currently under the mouse cursor.  None when the
-	/// cursor is over a non-identifier token or outside the code area.
-	hovered_variable: Option<String>,
-	/// All occurrences of `hovered_variable` in the KSL source, with roles.
-	/// Recomputed each time `hovered_variable` changes.
+	/// Name of the identifier that was last clicked and is currently highlighted.
+	/// None when no variable is selected.  Clicking the same variable again clears it.
+	active_variable: Option<String>,
+	/// All occurrences of `active_variable` in the KSL source, with roles.
+	/// Recomputed each time `active_variable` changes.
 	var_occurrences: Vec<VarOccurrence>,
 }
 
@@ -609,7 +609,7 @@ impl KaisekiApp {
 				.collect(),
 			expanded_spans: HashSet::new(),
 			focus_handle: cx.focus_handle(),
-			hovered_variable: None,
+			active_variable: None,
 			var_occurrences: Vec::new(),
 		}
 	}
@@ -737,11 +737,23 @@ impl Render for KaisekiApp {
 			}
 		});
 
-		let move_listener = cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-			let new_var = this.var_at_position(event.position);
-			if new_var != this.hovered_variable {
-				this.hovered_variable = new_var.clone();
-				this.var_occurrences = match &new_var {
+		// Click listener: toggle the active variable.
+		// Clicking an Ident activates it; clicking the same Ident again clears it;
+		// clicking anything else (whitespace, operator, empty area) also clears it.
+		let click_listener = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+			if event.button != MouseButton::Left {
+				return;
+			}
+			let clicked = this.var_at_position(event.position);
+			// Toggle: if the user clicks the already-active variable, deactivate.
+			let next = if clicked.is_some() && clicked == this.active_variable {
+				None
+			} else {
+				clicked
+			};
+			if next != this.active_variable {
+				this.active_variable = next.clone();
+				this.var_occurrences = match &next {
 					Some(name) => find_var_occurrences(name, &this.main_panel.lines),
 					None => Vec::new(),
 				};
@@ -749,16 +761,8 @@ impl Render for KaisekiApp {
 			}
 		});
 
-		let hover_listener = cx.listener(|this, is_hovered: &bool, _window, cx| {
-			if !is_hovered && this.hovered_variable.is_some() {
-				this.hovered_variable = None;
-				this.var_occurrences.clear();
-				cx.notify();
-			}
-		});
-
-		// Capture hover state into Arc so it can be shared with the uniform_list
-		// closure (move) and the connection-gutter canvas closure.
+		// Capture active-variable state into Arc so the uniform_list closure (move)
+		// and the connection-gutter canvas closure can share it.
 		let var_occurrences = Arc::new(self.var_occurrences.clone());
 		let var_occs_list  = Arc::clone(&var_occurrences);
 		let scroll_y       = self.main_panel.smooth.current_y;
@@ -795,13 +799,11 @@ impl Render for KaisekiApp {
 					.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
 					.child(
 						div()
-						.id("ksl-content") // Stateful<Div> — required for on_hover
 						.flex_1()
 						.overflow_hidden()
 						.relative() // needed for the absolute-positioned gutter canvas
 						.on_scroll_wheel(scroll_listener)
-						.on_mouse_move(move_listener)
-						.on_hover(hover_listener)
+						.on_mouse_down(MouseButton::Left, click_listener)
 						.child(
 							uniform_list("ksl-rows", row_count, move |range, _window, _cx| {
 								range
@@ -988,39 +990,49 @@ fn render_source_snippet_row(
 
 // -- Connection-gutter canvas -------------------------------------------------
 
-/// Absolute-positioned canvas that overlays the right edge of the KSL panel
-/// and draws the variable-occurrence connection visualisation:
+/// Absolute-positioned canvas that overlays the right edge of the KSL panel.
 ///
-///   • A thin vertical line from the first to the last occurrence
-///   • A colour-coded filled dot at each occurrence
-///       Definition  →  Lavender  #b4befe
-///       Write       →  Yellow    #f9e2af
-///       Read        →  Teal      #94e2d5
-///   • A small downward-pointing arrow between consecutive occurrences to
-///     indicate the direction of data flow
+/// Visual layout within the 40 px canvas (x measured from canvas left edge):
 ///
-/// Layout (column positions within the 12 px gutter, all x from left edge):
+///   0          20         40
+///   │←leader──→●          │
+///   │           │          │  ← rail (vertical bar)
+///   │←leader──→●          │
+///   │           │          │
+///   │←leader──→●          │
+///   │                      │
 ///
-///   0 ──────────── 6 ──────────── 12
-///         centre at x = 6
+///   leader  : 1 px tall horizontal line anchoring each dot to the code side
+///   ●       : 6×6 px rounded dot, colour-coded by role
+///               Definition  →  Lavender  #b4befe
+///               Write       →  Yellow    #f9e2af
+///               Read        →  Teal      #94e2d5
+///   rail    : 2 px wide vertical bar connecting first ↔ last occurrence
+///   arrows  : small downward triangles between consecutive dots (data-flow direction)
 fn connection_gutter_canvas(
 	occurrences:  Arc<Vec<VarOccurrence>>,
 	scroll_y:     f32,
 	display_rows: Arc<Vec<DisplayRow>>,
 ) -> impl IntoElement {
-	// Gutter geometry
-	const GUTTER_W: f32 = 12.0;
-	const CENTER_X: f32 = GUTTER_W / 2.0;
+	// ── Canvas geometry ───────────────────────────────────────────────────────
+	//
+	//   CANVAS_W   total canvas width (px)
+	//   RAIL_X     x-centre of the rail and dots, measured from canvas.left
+	//   LEADER_X0  x at which the leader line starts (left end)
+	//
+	const CANVAS_W:  f32 = 40.0;
+	const RAIL_X:    f32 = 20.0; // centre of dots: 20 px from right edge
+	const LEADER_X0: f32 = 0.0;  // leader starts at the canvas left boundary
 
 	// Row / padding constants (must match the values in render).
 	const ROW_H:   f32 = 22.0;
 	const TOP_PAD: f32 = 8.0;
 
 	// Visual sizes
-	const DOT_R:    f32 = 3.0; // dot half-width / half-height (square, corner-rounded)
-	const LINE_W:   f32 = 2.0;
-	const ARROW_W:  f32 = 5.0;
-	const ARROW_H:  f32 = 4.0;
+	const DOT_R:   f32 = 3.0; // dot half-size (square with rounded corners)
+	const LINE_W:  f32 = 2.0; // vertical rail width
+	const ARROW_W: f32 = 5.0;
+	const ARROW_H: f32 = 4.0;
 
 	canvas(
 		|_bounds, _window, _cx| (),
@@ -1031,9 +1043,9 @@ fn connection_gutter_canvas(
 
 			let panel_h = bounds.size.height.to_f64() as f32;
 
-			// Map each occurrence to its y-centre within the canvas (panel-relative).
-			// Occurrences whose y falls outside the viewport are kept but not drawn
-			// (they still participate in the spanning line / arrow computation).
+			// Map each occurrence to its canvas-relative y-centre, corrected for
+			// the current scroll offset.  Out-of-viewport occurrences are kept in
+			// the list so they participate in the spanning rail computation.
 			let positions: Vec<(f32, VarRole)> = occurrences
 				.iter()
 				.filter_map(|occ| {
@@ -1043,7 +1055,6 @@ fn connection_gutter_canvas(
 							DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx
 						)
 					})?;
-					// Canvas-relative y of the row centre, adjusted for scroll.
 					let y = ROW_H * display_idx as f32 + TOP_PAD + ROW_H / 2.0 + scroll_y;
 					Some((y, occ.role))
 				})
@@ -1056,18 +1067,18 @@ fn connection_gutter_canvas(
 			let y_first = positions.first().map(|(y, _)| *y).unwrap();
 			let y_last  = positions.last().map(|(y, _)| *y).unwrap();
 
-			// ── Spanning vertical line ────────────────────────────────────────
+			// ── Vertical spanning rail ────────────────────────────────────────
 			if y_first < y_last {
-				let line_y_start = y_first.max(0.0);
-				let line_y_end   = y_last.min(panel_h);
-				if line_y_start < line_y_end {
+				let rail_y_start = y_first.max(0.0);
+				let rail_y_end   = y_last.min(panel_h);
+				if rail_y_start < rail_y_end {
 					window.paint_quad(fill(
 						Bounds {
 							origin: point(
-								bounds.origin.x + px(CENTER_X - LINE_W / 2.0),
-								bounds.origin.y + px(line_y_start),
+								bounds.origin.x + px(RAIL_X - LINE_W / 2.0),
+								bounds.origin.y + px(rail_y_start),
 							),
-							size: size(px(LINE_W), px(line_y_end - line_y_start)),
+							size: size(px(LINE_W), px(rail_y_end - rail_y_start)),
 						},
 						rgba(0x585b7088),
 					));
@@ -1080,9 +1091,7 @@ fn connection_gutter_canvas(
 				if y_mid < 0.0 || y_mid > panel_h {
 					continue;
 				}
-
-				// Downward-pointing triangle.
-				let ax = bounds.origin.x + px(CENTER_X);
+				let ax = bounds.origin.x + px(RAIL_X);
 				let ay = bounds.origin.y + px(y_mid);
 
 				let mut pb = PathBuilder::fill();
@@ -1090,29 +1099,44 @@ fn connection_gutter_canvas(
 				pb.line_to(point(ax + px(ARROW_W / 2.0), ay - px(ARROW_H / 2.0)));
 				pb.line_to(point(ax,                      ay + px(ARROW_H / 2.0)));
 				pb.close();
-
 				if let Ok(path) = pb.build() {
 					window.paint_path(path, rgba(0x585b70cc));
 				}
 			}
 
-			// ── Role-coloured dots ────────────────────────────────────────────
+			// ── Leader lines + role-coloured dots ─────────────────────────────
 			for (y, role) in &positions {
 				if *y < -DOT_R || *y > panel_h + DOT_R {
 					continue;
 				}
 
+				// Horizontal leader line from the canvas left edge to the dot.
+				// Painted before the dot so the dot renders on top.
+				let leader_end_x = RAIL_X - DOT_R - 1.0; // 1 px gap before dot edge
+				if leader_end_x > LEADER_X0 {
+					window.paint_quad(fill(
+						Bounds {
+							origin: point(
+								bounds.origin.x + px(LEADER_X0),
+								bounds.origin.y + px(y - 0.5),
+							),
+							size: size(px(leader_end_x - LEADER_X0), px(1.0)),
+						},
+						rgba(0x585b7066),
+					));
+				}
+
+				// Role dot.
 				let dot_color: Hsla = match role {
 					VarRole::Definition => rgba(0xb4befeff).into(),
 					VarRole::Write      => rgba(0xf9e2afff).into(),
 					VarRole::Read       => rgba(0x94e2d5ff).into(),
 				};
-
 				window.paint_quad(
 					fill(
 						Bounds {
 							origin: point(
-								bounds.origin.x + px(CENTER_X - DOT_R),
+								bounds.origin.x + px(RAIL_X - DOT_R),
 								bounds.origin.y + px(y - DOT_R),
 							),
 							size: size(px(DOT_R * 2.0), px(DOT_R * 2.0)),
@@ -1127,7 +1151,7 @@ fn connection_gutter_canvas(
 	.absolute()
 	.right(px(0.))
 	.top(px(0.))
-	.w(px(GUTTER_W))
+	.w(px(CANVAS_W))
 	.h_full()
 }
 
