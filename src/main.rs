@@ -3,19 +3,13 @@ mod lang;
 use std::{collections::HashSet, ops::Range, sync::Arc};
 
 use iced::{
-	alignment, mouse,
+	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Task, alignment, mouse,
 	widget::{canvas, column, container, row, scrollable},
-	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Task,
 };
-use syntect::{
-	easy::HighlightLines,
-	highlighting::ThemeSet,
-	parsing::SyntaxSet,
-	util::LinesWithEndings,
-};
+use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings};
 
-use lang::{SourceSpan, SAMPLE_KSL, SAMPLE_SOURCE_MAP};
 use lang::lexer::TokenKind;
+use lang::{SAMPLE_KSL, SAMPLE_SOURCE_MAP, SourceSpan};
 
 // ── Sample decompiled-C source (Ghidra output for NIM_GetStreamFPV) ───────────
 
@@ -216,72 +210,82 @@ LAB_180e2b65e:
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
-const ROW_H:          f32 = 22.0;
-const CHAR_W:         f32 = 7.8; // approx. Consolas 13 px glyph advance
-const FONT_SIZE:      f32 = 13.0;
-const TOP_PAD:        f32 = 8.0;
+const ROW_H: f32 = 22.0;
+const CHAR_W: f32 = 7.8; // approx. Consolas 13 px glyph advance
+const FONT_SIZE: f32 = 13.0;
+const TOP_PAD: f32 = 8.0;
 
 // Left-margin layout
 //
 //   ┌─ CONN_GUTTER_W ─┬─── GUTTER_W ───┬─── code ──────────
 //   │  rail / dots    │  line numbers  │
 //
-const CONN_GUTTER_W:  f32 = 28.0; // connection gutter (left of line numbers)
-const GUTTER_W:       f32 = 56.0; // line-number gutter
-const CODE_X:         f32 = CONN_GUTTER_W + GUTTER_W; // where code text starts
+const CONN_GUTTER_W: f32 = 28.0; // connection gutter (left of line numbers)
+const GUTTER_W: f32 = 56.0; // line-number gutter
+const CODE_X: f32 = CONN_GUTTER_W + GUTTER_W; // where code text starts
 
 // Connection gutter geometry
-const DOT_R:          f32 = 3.5;
-const RAIL_W:         f32 = 2.0;
+const DOT_R: f32 = 3.5;
+const RAIL_W: f32 = 2.0;
 
 // ── Color palette (Catppuccin Mocha) ─────────────────────────────────────────
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
-	Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+	Color {
+		r: r as f32 / 255.0,
+		g: g as f32 / 255.0,
+		b: b as f32 / 255.0,
+		a: 1.0,
+	}
 }
 
 const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
-	Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 }
+	Color {
+		r: r as f32 / 255.0,
+		g: g as f32 / 255.0,
+		b: b as f32 / 255.0,
+		a: a as f32 / 255.0,
+	}
 }
 
-const BASE:           Color = rgb(0x1e, 0x1e, 0x2e);
-const MANTLE:         Color = rgb(0x18, 0x18, 0x25);
-const SURFACE0:       Color = rgb(0x31, 0x32, 0x44);
-const OVERLAY0:       Color = rgb(0x6c, 0x70, 0x86);
-const SUBTEXT1:       Color = rgb(0xba, 0xc2, 0xde);
-const SUBTEXT0:       Color = rgb(0xa6, 0xad, 0xc8);
-const TEXT_COL:       Color = rgb(0xcd, 0xd6, 0xf4);
-const BLUE:           Color = rgb(0x89, 0xb4, 0xfa);
-const SKY:            Color = rgb(0x89, 0xdc, 0xeb);
-const GREEN:          Color = rgb(0xa6, 0xe3, 0xa1);
-const YELLOW:         Color = rgb(0xf9, 0xe2, 0xaf);
-const PEACH:          Color = rgb(0xfa, 0xb3, 0x87);
-const MAUVE:          Color = rgb(0xcb, 0xa6, 0xf7);
+const BASE: Color = rgb(0x1e, 0x1e, 0x2e);
+const MANTLE: Color = rgb(0x18, 0x18, 0x25);
+const SURFACE0: Color = rgb(0x31, 0x32, 0x44);
+const OVERLAY0: Color = rgb(0x6c, 0x70, 0x86);
+const SUBTEXT1: Color = rgb(0xba, 0xc2, 0xde);
+const SUBTEXT0: Color = rgb(0xa6, 0xad, 0xc8);
+const TEXT_COL: Color = rgb(0xcd, 0xd6, 0xf4);
+const BLUE: Color = rgb(0x89, 0xb4, 0xfa);
+const SKY: Color = rgb(0x89, 0xdc, 0xeb);
+const GREEN: Color = rgb(0xa6, 0xe3, 0xa1);
+const YELLOW: Color = rgb(0xf9, 0xe2, 0xaf);
+const PEACH: Color = rgb(0xfa, 0xb3, 0x87);
+const MAUVE: Color = rgb(0xcb, 0xa6, 0xf7);
 
-const GUTTER_FG:      Color = rgba(0x58, 0x5b, 0x70, 0xff);
-const GUTTER_DIM:     Color = rgba(0x58, 0x5b, 0x70, 0x44);
-const SNIPPET_BG:     Color = rgba(0x18, 0x18, 0x25, 0xdd);
-const ACCORDION_FG:   Color = rgba(0xe6, 0x89, 0x45, 0xcc);
-const ACCORDION_BG:   Color = rgba(0x31, 0x32, 0x44, 0x88);
+const GUTTER_FG: Color = rgba(0x58, 0x5b, 0x70, 0xff);
+const GUTTER_DIM: Color = rgba(0x58, 0x5b, 0x70, 0x44);
+const SNIPPET_BG: Color = rgba(0x18, 0x18, 0x25, 0xdd);
+const ACCORDION_FG: Color = rgba(0xe6, 0x89, 0x45, 0xcc);
+const ACCORDION_BG: Color = rgba(0x31, 0x32, 0x44, 0x88);
 const SNIPPET_BORDER: Color = rgba(0xe6, 0x89, 0x45, 0x66);
-const RAIL_COL:       Color = rgba(0x58, 0x5b, 0x70, 0x88);
-const SAPPHIRE_DIM:   Color = rgba(0x74, 0xc7, 0xec, 0x99);
+const RAIL_COL: Color = rgba(0x58, 0x5b, 0x70, 0x88);
+const SAPPHIRE_DIM: Color = rgba(0x74, 0xc7, 0xec, 0x99);
 
 const fn var_bg(role: VarRole) -> Color {
 	match role {
 		VarRole::Definition => rgba(0xb4, 0xbe, 0xfe, 0x55),
-		VarRole::Write      => rgba(0xf9, 0xe2, 0xaf, 0x55),
-		VarRole::Read       => rgba(0x94, 0xe2, 0xd5, 0x55),
-		VarRole::TypeRef    => rgba(0x6c, 0x70, 0x86, 0x33),
+		VarRole::Write => rgba(0xf9, 0xe2, 0xaf, 0x55),
+		VarRole::Read => rgba(0x94, 0xe2, 0xd5, 0x55),
+		VarRole::TypeRef => rgba(0x6c, 0x70, 0x86, 0x33),
 	}
 }
 
 const fn var_dot(role: VarRole) -> Color {
 	match role {
 		VarRole::Definition => GREEN,
-		VarRole::Read       => BLUE,
-		VarRole::Write      => YELLOW,
-		VarRole::TypeRef    => OVERLAY0,
+		VarRole::Read => BLUE,
+		VarRole::Write => YELLOW,
+		VarRole::TypeRef => OVERLAY0,
 	}
 }
 
@@ -290,7 +294,7 @@ const fn var_dot(role: VarRole) -> Color {
 /// One syntax-highlighted line: the raw text plus a list of (byte-range, colour) spans.
 #[derive(Clone, Debug)]
 struct HighlightedLine {
-	text:       String,
+	text: String,
 	/// (byte_range, foreground_color) — non-overlapping, source order.
 	highlights: Vec<(Range<usize>, Color)>,
 }
@@ -310,35 +314,38 @@ enum VarRole {
 #[derive(Clone, Debug)]
 struct VarOccurrence {
 	ksl_line_idx: usize,
-	byte_range:   Range<usize>,
-	role:         VarRole,
+	byte_range: Range<usize>,
+	role: VarRole,
 }
 
 /// Flat display-list entry, either a KSL line or an expanded C source line.
 #[derive(Clone, Debug)]
 enum DisplayRow {
 	KslLine {
-		ksl_idx:     usize,
-		span_idx:    Option<usize>, // Some → this row carries the accordion toggle button
+		ksl_idx: usize,
+		span_idx: Option<usize>, // Some → this row carries the accordion toggle button
 		is_expanded: bool,
-		label:       &'static str,
+		label: &'static str,
 	},
-	SourceLine { source_idx: usize, is_last: bool },
+	SourceLine {
+		source_idx: usize,
+		is_last: bool,
+	},
 }
 
 // ── KSL syntax highlighting ───────────────────────────────────────────────────
 
 fn token_color(kind: TokenKind) -> Option<Color> {
 	Some(match kind {
-		TokenKind::Keyword    => MAUVE,
-		TokenKind::Atom       => PEACH,
+		TokenKind::Keyword => MAUVE,
+		TokenKind::Atom => PEACH,
 		TokenKind::Number | TokenKind::Offset => YELLOW,
 		TokenKind::DocComment => GREEN,
 		TokenKind::SectionSep => SAPPHIRE_DIM,
-		TokenKind::Comment    => OVERLAY0,
-		TokenKind::Operator   => SKY,
-		TokenKind::Punct      => SUBTEXT1,
-		TokenKind::Ident      => TEXT_COL,
+		TokenKind::Comment => OVERLAY0,
+		TokenKind::Operator => SKY,
+		TokenKind::Punct => SUBTEXT1,
+		TokenKind::Ident => TEXT_COL,
 		TokenKind::Whitespace | TokenKind::Unknown => return None,
 	})
 }
@@ -351,7 +358,10 @@ fn build_ksl_lines(source: &str) -> Vec<HighlightedLine> {
 				.into_iter()
 				.filter_map(|t| token_color(t.kind).map(|c| (t.range, c)))
 				.collect();
-			HighlightedLine { text: line.to_string(), highlights }
+			HighlightedLine {
+				text: line.to_string(),
+				highlights,
+			}
 		})
 		.collect()
 }
@@ -359,9 +369,9 @@ fn build_ksl_lines(source: &str) -> Vec<HighlightedLine> {
 // ── Syntect code highlighting ─────────────────────────────────────────────────
 
 fn build_source_lines(code: &str) -> Vec<HighlightedLine> {
-	let ss     = SyntaxSet::load_defaults_newlines();
-	let ts     = ThemeSet::load_defaults();
-	let theme  = &ts.themes["base16-ocean.dark"];
+	let ss = SyntaxSet::load_defaults_newlines();
+	let ts = ThemeSet::load_defaults();
+	let theme = &ts.themes["base16-ocean.dark"];
 	let syntax = ss
 		.find_syntax_by_extension("cpp")
 		.unwrap_or_else(|| ss.find_syntax_plain_text());
@@ -416,19 +426,30 @@ fn build_source_lines(code: &str) -> Vec<HighlightedLine> {
 fn is_type_position(tokens: &[lang::lexer::Token], tok_pos: usize, line: &str) -> bool {
 	let mut idx = tok_pos;
 	loop {
-		let prev = tokens[..idx].iter().enumerate().rev()
+		let prev = tokens[..idx]
+			.iter()
+			.enumerate()
+			.rev()
 			.find(|(_, t)| t.kind != TokenKind::Whitespace);
-		let Some((prev_idx, prev_tok)) = prev else { return false; };
+		let Some((prev_idx, prev_tok)) = prev else {
+			return false;
+		};
 		let s = &line[prev_tok.range.clone()];
 		match prev_tok.kind {
 			// Type modifiers — keep scanning further back
-			TokenKind::Operator if s == "*" || s == "&" => { idx = prev_idx; }
-			TokenKind::Punct    if s == "?"             => { idx = prev_idx; }
+			TokenKind::Operator if s == "*" || s == "&" => {
+				idx = prev_idx;
+			}
+			TokenKind::Punct if s == "?" => {
+				idx = prev_idx;
+			}
 			// Colon: definitely a type annotation
-			TokenKind::Punct    if s == ":" => return true,
+			TokenKind::Punct if s == ":" => return true,
 			// Arrow: return-type when preceded by `)`, member-access otherwise
 			TokenKind::Operator if s == "->" => {
-				return tokens[..prev_idx].iter().rev()
+				return tokens[..prev_idx]
+					.iter()
+					.rev()
 					.find(|t| t.kind != TokenKind::Whitespace)
 					.map(|t| t.kind == TokenKind::Punct && &line[t.range.clone()] == ")")
 					.unwrap_or(false);
@@ -491,7 +512,7 @@ fn find_var_occurrences(name: &str, lines: &[HighlightedLine]) -> Vec<VarOccurre
 
 			result.push(VarOccurrence {
 				ksl_line_idx: line_idx,
-				byte_range:   token.range.clone(),
+				byte_range: token.range.clone(),
 				role,
 			});
 		}
@@ -509,32 +530,43 @@ struct KaisekiState {
 	expanded_spans:  HashSet<usize>,
 	active_variable: Option<String>,
 	var_occurrences: Arc<Vec<VarOccurrence>>,
+	// Pre-computed brace depths for scope-aware occurrence filtering.
+	depth_map:       lang::scope::DepthMap,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
 	ToggleSpan(usize),
-	SetActiveVariable(Option<String>),
+	/// `Some((name, ksl_line_idx))` — activate; `None` — clear.
+	/// The line index is needed to resolve which declaration scope to use when
+	/// the same name is bound multiple times (e.g. shadowing across if/else branches).
+	SetActiveVariable(Option<(String, usize)>),
 }
 
 impl KaisekiState {
 	fn new() -> (Self, Task<Message>) {
+		let ksl_lines = build_ksl_lines(SAMPLE_KSL);
+		let depth_map = {
+			let raw: Vec<&str> = ksl_lines.iter().map(|l| l.text.as_str()).collect();
+			lang::scope::DepthMap::build(&raw)
+		};
 		let state = Self {
-			ksl_lines:    Arc::new(build_ksl_lines(SAMPLE_KSL)),
+			ksl_lines: Arc::new(ksl_lines),
 			source_lines: Arc::new(build_source_lines(SAMPLE_CODE)),
-			source_map:   Arc::new(
+			source_map: Arc::new(
 				SAMPLE_SOURCE_MAP
 					.iter()
 					.map(|s| SourceSpan {
-						label:            s.label,
+						label: s.label,
 						ksl_trigger_line: s.ksl_trigger_line,
-						source_lines:     s.source_lines.clone(),
+						source_lines: s.source_lines.clone(),
 					})
 					.collect(),
 			),
 			expanded_spans:  HashSet::new(),
 			active_variable: None,
 			var_occurrences: Arc::new(Vec::new()),
+			depth_map,
 		};
 		(state, Task::none())
 	}
@@ -546,27 +578,41 @@ impl KaisekiState {
 					self.expanded_spans.insert(idx);
 				}
 			}
-			Message::SetActiveVariable(name) => {
-				self.var_occurrences = Arc::new(match &name {
-					Some(n) => find_var_occurrences(n, &self.ksl_lines),
-					None    => Vec::new(),
-				});
-				self.active_variable = name;
+			Message::SetActiveVariable(val) => {
+				let (new_occurrences, new_active) = match val {
+					None => (Vec::new(), None),
+					Some((name, clicked_line)) => {
+						let all_occurrences = find_var_occurrences(&name, &self.ksl_lines);
+						let raw: Vec<&str> = self.ksl_lines.iter()
+							.map(|l| l.text.as_str()).collect();
+						let scoped_occurrences = match lang::scope::visible_scope(
+							&name, clicked_line, &raw, &self.depth_map,
+						) {
+							Some(range) => all_occurrences.into_iter()
+								.filter(|occurrence| range.contains(&occurrence.ksl_line_idx))
+								.collect(),
+							None => all_occurrences,
+						};
+						(scoped_occurrences, Some(name))
+					}
+				};
+				self.var_occurrences = Arc::new(new_occurrences);
+				self.active_variable = new_active;
 			}
 		}
 		Task::none()
 	}
 
 	fn view(&self) -> Element<'_, Message> {
-		let display_rows  = Arc::new(self.build_display_rows());
+		let display_rows = Arc::new(self.build_display_rows());
 		let canvas_height = display_rows.len() as f32 * ROW_H + TOP_PAD * 2.0;
 
 		let code_canvas = CodeCanvas {
-			display_rows:    Arc::clone(&display_rows),
-			ksl_lines:       Arc::clone(&self.ksl_lines),
-			source_lines:    Arc::clone(&self.source_lines),
+			display_rows: Arc::clone(&display_rows),
+			ksl_lines: Arc::clone(&self.ksl_lines),
+			source_lines: Arc::clone(&self.source_lines),
 			var_occurrences: Arc::clone(&self.var_occurrences),
-			source_map:      Arc::clone(&self.source_map),
+			source_map: Arc::clone(&self.source_map),
 			active_variable: self.active_variable.clone(),
 		};
 
@@ -586,10 +632,8 @@ impl KaisekiState {
 				background: Some(Background::Color(MANTLE)),
 				..Default::default()
 			}),
-
 			// ── Panel header with language badge ─────────────────────────────
 			panel_header(),
-
 			// ── Scrollable code canvas ───────────────────────────────────────
 			// The canvas is given a fixed height equal to the full content height.
 			// iced's scrollable widget handles viewport clipping; the canvas renders
@@ -610,24 +654,28 @@ impl KaisekiState {
 	/// Flatten KSL lines and expanded accordion entries into a single display list.
 	fn build_display_rows(&self) -> Vec<DisplayRow> {
 		let ksl_count = self.ksl_lines.len();
-		let mut rows  = Vec::with_capacity(ksl_count);
+		let mut rows = Vec::with_capacity(ksl_count);
 
 		for ksl_idx in 0..ksl_count {
-			let span_idx = self
-				.source_map
-				.iter()
-				.position(|s| s.ksl_trigger_line == ksl_idx);
+			let span_idx = self.source_map.iter().position(|s| s.ksl_trigger_line == ksl_idx);
 
 			let (is_expanded, label) = match span_idx {
 				Some(si) => (self.expanded_spans.contains(&si), self.source_map[si].label),
-				None     => (false, ""),
+				None => (false, ""),
 			};
 
-			rows.push(DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label });
+			rows.push(DisplayRow::KslLine {
+				ksl_idx,
+				span_idx,
+				is_expanded,
+				label,
+			});
 
-			if let Some(si) = span_idx && self.expanded_spans.contains(&si) {
+			if let Some(si) = span_idx
+				&& self.expanded_spans.contains(&si)
+			{
 				let range = self.source_map[si].source_lines.clone();
-				let last  = range.end.saturating_sub(1);
+				let last = range.end.saturating_sub(1);
 				for source_idx in range {
 					rows.push(DisplayRow::SourceLine {
 						source_idx,
@@ -651,18 +699,21 @@ fn panel_header<'a>() -> Element<'a, Message> {
 					.font(Font::MONOSPACE)
 					.size(11)
 					.color(OVERLAY0),
-				container(
-					iced::widget::text("KSL")
-						.font(Font::MONOSPACE)
-						.size(9)
-						.color(TEXT_COL)
-				)
-				.padding(iced::Padding { top: 1.0, bottom: 1.0, left: 5.0, right: 5.0 })
-				.style(move |_| container::Style {
-					background: Some(Background::Color(rgba(0x89, 0xb4, 0xfa, 0x55))),
-					border: Border { radius: 3.0.into(), ..Default::default() },
-					..Default::default()
-				}),
+				container(iced::widget::text("KSL").font(Font::MONOSPACE).size(9).color(TEXT_COL))
+					.padding(iced::Padding {
+						top: 1.0,
+						bottom: 1.0,
+						left: 5.0,
+						right: 5.0
+					})
+					.style(move |_| container::Style {
+						background: Some(Background::Color(rgba(0x89, 0xb4, 0xfa, 0x55))),
+						border: Border {
+							radius: 3.0.into(),
+							..Default::default()
+						},
+						..Default::default()
+					}),
 			]
 			.spacing(8)
 			.align_y(alignment::Vertical::Center)
@@ -676,11 +727,10 @@ fn panel_header<'a>() -> Element<'a, Message> {
 			..Default::default()
 		}),
 		// 1 px bottom separator line
-		container(iced::widget::Space::new(Length::Fill, 1))
-			.style(move |_| container::Style {
-				background: Some(Background::Color(SURFACE0)),
-				..Default::default()
-			}),
+		container(iced::widget::Space::new(Length::Fill, 1)).style(move |_| container::Style {
+			background: Some(Background::Color(SURFACE0)),
+			..Default::default()
+		}),
 	]
 	.into()
 }
@@ -690,11 +740,11 @@ fn panel_header<'a>() -> Element<'a, Message> {
 /// Full-panel canvas: renders all display rows and handles mouse events.
 /// Wrapped in `scrollable` — canvas height equals total content height.
 struct CodeCanvas {
-	display_rows:    Arc<Vec<DisplayRow>>,
-	ksl_lines:       Arc<Vec<HighlightedLine>>,
-	source_lines:    Arc<Vec<HighlightedLine>>,
+	display_rows: Arc<Vec<DisplayRow>>,
+	ksl_lines: Arc<Vec<HighlightedLine>>,
+	source_lines: Arc<Vec<HighlightedLine>>,
 	var_occurrences: Arc<Vec<VarOccurrence>>,
-	source_map:      Arc<Vec<SourceSpan>>,
+	source_map: Arc<Vec<SourceSpan>>,
 	active_variable: Option<String>,
 }
 
@@ -739,27 +789,22 @@ impl canvas::Program<Message> for CodeCanvas {
 				// ── Variable identifier click ─────────────────────────────────
 				if pos.x >= CODE_X {
 					let char_col = ((pos.x - CODE_X) / CHAR_W) as usize;
-					let line     = &self.ksl_lines[*ksl_idx];
+					let line = &self.ksl_lines[*ksl_idx];
 					for token in lang::lexer::tokenize(&line.text) {
-						if token.kind == TokenKind::Ident
-							&& char_col >= token.range.start
-							&& char_col < token.range.end
+						if token.kind == TokenKind::Ident && char_col >= token.range.start && char_col < token.range.end
 						{
 							let name = line.text[token.range].to_string();
-							let msg  = if Some(&name) == self.active_variable.as_ref() {
+							let msg = if Some(&name) == self.active_variable.as_ref() {
 								Message::SetActiveVariable(None) // toggle off on second click
 							} else {
-								Message::SetActiveVariable(Some(name))
+								Message::SetActiveVariable(Some((name, *ksl_idx)))
 							};
 							return (canvas::event::Status::Captured, Some(msg));
 						}
 					}
 					// Click on whitespace / non-ident: clear selection
 					if self.active_variable.is_some() {
-						return (
-							canvas::event::Status::Captured,
-							Some(Message::SetActiveVariable(None)),
-						);
+						return (canvas::event::Status::Captured, Some(Message::SetActiveVariable(None)));
 					}
 				}
 			}
@@ -786,18 +831,19 @@ impl canvas::Program<Message> for CodeCanvas {
 			let y = TOP_PAD + row_idx as f32 * ROW_H;
 
 			match display_row {
-				DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label } => {
+				DisplayRow::KslLine {
+					ksl_idx,
+					span_idx,
+					is_expanded,
+					label,
+				} => {
 					let line = &self.ksl_lines[*ksl_idx];
 
 					// Variable occurrence background tints
 					for occ in self.var_occurrences.iter().filter(|o| o.ksl_line_idx == *ksl_idx) {
 						let x0 = CODE_X + occ.byte_range.start as f32 * CHAR_W;
 						let x1 = CODE_X + occ.byte_range.end as f32 * CHAR_W;
-						frame.fill_rectangle(
-							Point::new(x0, y),
-							Size::new(x1 - x0, ROW_H),
-							var_bg(occ.role),
-						);
+						frame.fill_rectangle(Point::new(x0, y), Size::new(x1 - x0, ROW_H), var_bg(occ.role));
 					}
 
 					draw_gutter(&mut frame, *ksl_idx + 1, y, GUTTER_FG);
@@ -809,20 +855,12 @@ impl canvas::Program<Message> for CodeCanvas {
 				}
 
 				DisplayRow::SourceLine { source_idx, is_last } => {
-					let line   = &self.source_lines[*source_idx];
-					let row_h  = if *is_last { ROW_H + 4.0 } else { ROW_H };
+					let line = &self.source_lines[*source_idx];
+					let row_h = if *is_last { ROW_H + 4.0 } else { ROW_H };
 
-					frame.fill_rectangle(
-						Point::new(0.0, y),
-						Size::new(bounds.width, row_h),
-						SNIPPET_BG,
-					);
+					frame.fill_rectangle(Point::new(0.0, y), Size::new(bounds.width, row_h), SNIPPET_BG);
 					// Left orange border (2 px)
-					frame.fill_rectangle(
-						Point::new(0.0, y),
-						Size::new(2.0, row_h),
-						SNIPPET_BORDER,
-					);
+					frame.fill_rectangle(Point::new(0.0, y), Size::new(2.0, row_h), SNIPPET_BORDER);
 
 					draw_gutter(&mut frame, *source_idx + 1, y, GUTTER_DIM);
 					draw_line(&mut frame, line, CODE_X, y + 4.5);
@@ -832,22 +870,13 @@ impl canvas::Program<Message> for CodeCanvas {
 
 		// Connection gutter: rail + dots in the left margin
 		if !self.var_occurrences.is_empty() {
-			draw_connection_gutter(
-				&mut frame,
-				&self.display_rows,
-				&self.var_occurrences,
-			);
+			draw_connection_gutter(&mut frame, &self.display_rows, &self.var_occurrences);
 		}
 
 		vec![frame.into_geometry()]
 	}
 
-	fn mouse_interaction(
-		&self,
-		_state: &(),
-		_bounds: Rectangle,
-		_cursor: mouse::Cursor,
-	) -> mouse::Interaction {
+	fn mouse_interaction(&self, _state: &(), _bounds: Rectangle, _cursor: mouse::Cursor) -> mouse::Interaction {
 		mouse::Interaction::default()
 	}
 }
@@ -862,16 +891,16 @@ fn accordion_btn_width(label: &str) -> f32 {
 
 /// Render a right-aligned line number into the gutter column (right of CONN_GUTTER_W).
 fn draw_gutter(frame: &mut canvas::Frame, num: usize, y: f32, color: Color) {
-	let s      = num.to_string();
+	let s = num.to_string();
 	let text_w = s.len() as f32 * CHAR_W;
-	let x      = CODE_X - 16.0 - text_w;
+	let x = CODE_X - 16.0 - text_w;
 	draw_text(frame, &s, x, y + 4.5, color);
 }
 
 /// Render a syntax-highlighted line starting at `x_start`.
 /// Fills gaps between highlight spans with the default text colour.
 fn draw_line(frame: &mut canvas::Frame, line: &HighlightedLine, x_start: f32, y: f32) {
-	let text   = &line.text;
+	let text = &line.text;
 	let mut cursor = 0usize;
 
 	for (range, color) in &line.highlights {
@@ -897,18 +926,12 @@ fn draw_line(frame: &mut canvas::Frame, line: &HighlightedLine, x_start: f32, y:
 }
 
 /// Draw the accordion ▶/▼ toggle badge on the right side of a KSL row.
-fn draw_accordion_btn(
-	frame:       &mut canvas::Frame,
-	canvas_w:    f32,
-	y:           f32,
-	is_expanded: bool,
-	label:       &str,
-) {
-	let chevron  = if is_expanded { "▼" } else { "▶" };
+fn draw_accordion_btn(frame: &mut canvas::Frame, canvas_w: f32, y: f32, is_expanded: bool, label: &str) {
+	let chevron = if is_expanded { "▼" } else { "▶" };
 	let btn_text = format!("{chevron} C  {label}");
-	let btn_w    = accordion_btn_width(label);
-	let btn_x    = canvas_w - 8.0 - btn_w;
-	let btn_y    = y + 3.0;
+	let btn_w = accordion_btn_width(label);
+	let btn_x = canvas_w - 8.0 - btn_w;
+	let btn_y = y + 3.0;
 
 	frame.fill_rectangle(Point::new(btn_x, btn_y), Size::new(btn_w, 16.0), ACCORDION_BG);
 	draw_text(frame, &btn_text, btn_x + 8.0, btn_y + 2.0, ACCORDION_FG);
@@ -940,23 +963,22 @@ fn draw_text(frame: &mut canvas::Frame, content: &str, x: f32, y: f32, color: Co
 //   │  │                      │            │ …
 //   │  ●  write (yellow)      │            │ bar(local_90)
 
-fn draw_connection_gutter(
-	frame:        &mut canvas::Frame,
-	display_rows: &[DisplayRow],
-	occurrences:  &[VarOccurrence],
-) {
+fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow], occurrences: &[VarOccurrence]) {
 	// Dot is centered horizontally inside CONN_GUTTER_W.
 	let dot_x = CONN_GUTTER_W / 2.0;
 
-	struct Entry { y: f32, role: VarRole }
+	struct Entry {
+		y: f32,
+		role: VarRole,
+	}
 
 	let entries: Vec<Entry> = occurrences
 		.iter()
 		.filter(|occ| occ.role != VarRole::TypeRef) // type names are not data flow
 		.filter_map(|occ| {
-			let display_idx = display_rows.iter().position(|r| {
-				matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx)
-			})?;
+			let display_idx = display_rows
+				.iter()
+				.position(|r| matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx))?;
 			let y = TOP_PAD + display_idx as f32 * ROW_H + ROW_H / 2.0;
 			Some(Entry { y, role: occ.role })
 		})
@@ -967,7 +989,7 @@ fn draw_connection_gutter(
 	}
 
 	let y_first = entries.first().unwrap().y;
-	let y_last  = entries.last().unwrap().y;
+	let y_last = entries.last().unwrap().y;
 
 	// ── Vertical spanning rail ────────────────────────────────────────────────
 	if y_first < y_last {
@@ -986,13 +1008,20 @@ fn draw_connection_gutter(
 	//
 	// tick_x1 is placed just left of the line-number column so the arrow tip
 	// sits flush against the numbers with a small gap, regardless of digit count.
-	let tick_x0  = dot_x + DOT_R + 2.0;
-	let depth    = 6.0; // arrowhead depth  (along the dominant axis)
-	let half     = 4.0; // arrowhead half-width (perpendicular axis)
+	let tick_x0 = dot_x + DOT_R + 2.0;
+	let depth = 6.0; // arrowhead depth  (along the dominant axis)
+	let half = 4.0; // arrowhead half-width (perpendicular axis)
 
 	// Compute tick_x1 so the arrow tip lands just left of the line numbers.
-	let max_line_num = display_rows.iter()
-		.filter_map(|r| if let DisplayRow::KslLine { ksl_idx, .. } = r { Some(ksl_idx + 1) } else { None })
+	let max_line_num = display_rows
+		.iter()
+		.filter_map(|r| {
+			if let DisplayRow::KslLine { ksl_idx, .. } = r {
+				Some(ksl_idx + 1)
+			} else {
+				None
+			}
+		})
 		.max()
 		.unwrap_or(1);
 	let num_digits = max_line_num.to_string().len();
@@ -1005,7 +1034,7 @@ fn draw_connection_gutter(
 			VarRole::Definition => {
 				// ↓ downward triangle centred on (dot_x, entry.y)
 				let mut path = canvas::path::Builder::new();
-				path.move_to(Point::new(dot_x,        entry.y + depth * 0.5)); // tip
+				path.move_to(Point::new(dot_x, entry.y + depth * 0.5)); // tip
 				path.line_to(Point::new(dot_x - half, entry.y - depth * 0.5)); // top-left
 				path.line_to(Point::new(dot_x + half, entry.y - depth * 0.5)); // top-right
 				path.close();
@@ -1022,7 +1051,7 @@ fn draw_connection_gutter(
 					);
 				}
 				let mut path = canvas::path::Builder::new();
-				path.move_to(Point::new(tick_x1,         entry.y));        // tip (right)
+				path.move_to(Point::new(tick_x1, entry.y)); // tip (right)
 				path.line_to(Point::new(tick_x1 - depth, entry.y - half)); // base top
 				path.line_to(Point::new(tick_x1 - depth, entry.y + half)); // base bottom
 				path.close();
@@ -1040,9 +1069,9 @@ fn draw_connection_gutter(
 					);
 				}
 				let mut path = canvas::path::Builder::new();
-				path.move_to(Point::new(tick_x1 - depth, entry.y));        // tip (left)
-				path.line_to(Point::new(tick_x1,         entry.y - half)); // base top-right
-				path.line_to(Point::new(tick_x1,         entry.y + half)); // base bottom-right
+				path.move_to(Point::new(tick_x1 - depth, entry.y)); // tip (left)
+				path.line_to(Point::new(tick_x1, entry.y - half)); // base top-right
+				path.line_to(Point::new(tick_x1, entry.y + half)); // base bottom-right
 				path.close();
 				frame.fill(&path.build(), color);
 			}
@@ -1056,7 +1085,7 @@ fn draw_connection_gutter(
 fn main() -> iced::Result {
 	iced::application("kaiseki", KaisekiState::update, KaisekiState::view)
 		.window(iced::window::Settings {
-			size:     iced::Size::new(1400.0, 900.0),
+			size: iced::Size::new(1400.0, 900.0),
 			min_size: Some(iced::Size::new(800.0, 600.0)),
 			..Default::default()
 		})

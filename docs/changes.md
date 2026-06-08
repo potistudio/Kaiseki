@@ -1,5 +1,40 @@
 # Changes
 
+## feat: スコープ解析によるハイライト範囲の絞り込み
+
+### 概要
+
+変数名をクリックしたとき、ファイル全体でなく **クリック箇所が属するスコープ内の出現のみ** をハイライトするよう変更。
+
+同一ブランチ内で同名変数が宣言される KSL パターン（例: if/else の各枝で `let ct = ...`）で、
+別枝の `ct` が誤ってハイライトされていた問題を修正。
+
+### 実装
+
+**`src/lang/scope.rs` (新規)**
+
+- `DepthMap` — KSL 全行の波括弧深度を事前計算。
+  - `depth_start[i]`: 行 i の先頭時点の深度
+  - `depth_min[i]`: 行 i 内で到達した最小深度（`} else {` のような行で途中で深度が落ちる場合に対応）
+- `find_decl_sites(name)` — `let name` / `var name` / `fn name` / `name:` パターンで宣言行を列挙
+- `visible_scope(name, at_line)` — クリック箇所を含む最も内側の宣言スコープ `[decl_line, scope_end)` を返す
+
+**`src/main.rs`**
+
+- `KaisekiState` に `depth_map: lang::scope::DepthMap` フィールドを追加
+- `Message::SetActiveVariable` を `Option<(String, usize)>` に変更（名前 + クリックした KSL 行番号）
+- `update()` — `visible_scope` で取得した行範囲で `find_var_occurrences` の結果をフィルタ
+
+### スコープ境界の扱い
+
+| 宣言パターン | depth | scope_end |
+| --- | --- | --- |
+| `let x` / `var x` (関数本体直下) | 1 | 関数閉じ `}` の行 |
+| `let ct` (if ブランチ内) | 2 | そのブランチの `}` (または `} else {` の行) |
+| 関数引数 `param:` | 0 | ファイル末尾 (depth が負になることはないため) |
+
+宣言が複数ある場合は **最も深い（最も内側の）宣言**を採用し、シャドーイングを正確に処理。
+
 ## feat: 接続ガター左マージン移動・役割矢印・型参照除外
 
 ### 接続ガター — 右端 → 行番号左の専用カラムへ移動

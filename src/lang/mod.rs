@@ -1,4 +1,5 @@
 pub mod lexer;
+pub mod scope;
 
 use std::ops::Range;
 
