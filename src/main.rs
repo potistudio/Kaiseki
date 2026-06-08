@@ -214,21 +214,25 @@ LAB_180e2b65e:
 
 "#;
 
-// ── Layout constants (match the original GPUI version) ────────────────────────
+// ── Layout constants ──────────────────────────────────────────────────────────
 
 const ROW_H:          f32 = 22.0;
-const GUTTER_W:       f32 = 56.0;
 const CHAR_W:         f32 = 7.8; // approx. Consolas 13 px glyph advance
 const FONT_SIZE:      f32 = 13.0;
 const TOP_PAD:        f32 = 8.0;
 
+// Left-margin layout
+//
+//   ┌─ CONN_GUTTER_W ─┬─── GUTTER_W ───┬─── code ──────────
+//   │  rail / dots    │  line numbers  │
+//
+const CONN_GUTTER_W:  f32 = 28.0; // connection gutter (left of line numbers)
+const GUTTER_W:       f32 = 56.0; // line-number gutter
+const CODE_X:         f32 = CONN_GUTTER_W + GUTTER_W; // where code text starts
+
 // Connection gutter geometry
-const DOT_FROM_RIGHT: f32 = 16.0;
-const LEADER_GAP:     f32 = 6.0;
-const DOT_R:          f32 = 3.0;
+const DOT_R:          f32 = 3.5;
 const RAIL_W:         f32 = 2.0;
-const ARROW_W:        f32 = 5.0;
-const ARROW_H:        f32 = 4.0;
 
 // ── Color palette (Catppuccin Mocha) ─────────────────────────────────────────
 
@@ -247,9 +251,8 @@ const OVERLAY0:       Color = rgb(0x6c, 0x70, 0x86);
 const SUBTEXT1:       Color = rgb(0xba, 0xc2, 0xde);
 const SUBTEXT0:       Color = rgb(0xa6, 0xad, 0xc8);
 const TEXT_COL:       Color = rgb(0xcd, 0xd6, 0xf4);
-const LAVENDER:       Color = rgb(0xb4, 0xbe, 0xfe);
+const BLUE:           Color = rgb(0x89, 0xb4, 0xfa);
 const SKY:            Color = rgb(0x89, 0xdc, 0xeb);
-const TEAL:           Color = rgb(0x94, 0xe2, 0xd5);
 const GREEN:          Color = rgb(0xa6, 0xe3, 0xa1);
 const YELLOW:         Color = rgb(0xf9, 0xe2, 0xaf);
 const PEACH:          Color = rgb(0xfa, 0xb3, 0x87);
@@ -262,8 +265,6 @@ const ACCORDION_FG:   Color = rgba(0xe6, 0x89, 0x45, 0xcc);
 const ACCORDION_BG:   Color = rgba(0x31, 0x32, 0x44, 0x88);
 const SNIPPET_BORDER: Color = rgba(0xe6, 0x89, 0x45, 0x66);
 const RAIL_COL:       Color = rgba(0x58, 0x5b, 0x70, 0x88);
-const ARROW_COL:      Color = rgba(0x58, 0x5b, 0x70, 0xcc);
-const LEADER_COL:     Color = rgba(0x58, 0x5b, 0x70, 0x66);
 const SAPPHIRE_DIM:   Color = rgba(0x74, 0xc7, 0xec, 0x99);
 
 const fn var_bg(role: VarRole) -> Color {
@@ -271,14 +272,16 @@ const fn var_bg(role: VarRole) -> Color {
 		VarRole::Definition => rgba(0xb4, 0xbe, 0xfe, 0x55),
 		VarRole::Write      => rgba(0xf9, 0xe2, 0xaf, 0x55),
 		VarRole::Read       => rgba(0x94, 0xe2, 0xd5, 0x55),
+		VarRole::TypeRef    => rgba(0x6c, 0x70, 0x86, 0x33),
 	}
 }
 
 const fn var_dot(role: VarRole) -> Color {
 	match role {
-		VarRole::Definition => LAVENDER,
+		VarRole::Definition => GREEN,
+		VarRole::Read       => BLUE,
 		VarRole::Write      => YELLOW,
-		VarRole::Read       => TEAL,
+		VarRole::TypeRef    => OVERLAY0,
 	}
 }
 
@@ -298,6 +301,9 @@ enum VarRole {
 	Definition,
 	Write,
 	Read,
+	/// Identifier appears as a type name, not as a value (e.g. after `:`, after `struct`).
+	/// Background tint is drawn but excluded from the connection gutter.
+	TypeRef,
 }
 
 /// One occurrence of the active variable that should be highlighted.
@@ -398,13 +404,52 @@ fn build_source_lines(code: &str) -> Vec<HighlightedLine> {
 
 // ── Variable analysis ─────────────────────────────────────────────────────────
 
-/// Scan every KSL line for tokens whose text equals `name` and classify each
-/// occurrence as Definition / Write / Read based on neighbouring tokens.
+/// Returns true when the identifier at `tok_pos` names a TYPE rather than a VALUE.
 ///
-/// Role heuristics (same as GPUI version):
-///   • Preceded by `let` or `var`     → Definition
-///   • Followed by `=` (not `==`)     → Write
-///   • Everything else                → Read
+/// Scans backward past whitespace and type-modifier tokens (`*`  `&`  `?`),
+/// then inspects the first "interesting" predecessor:
+///
+///   `:`              → type annotation after a colon                     → yes
+///   `->`  after `)`  → return-type position in a fn signature            → yes
+///   `struct` / `interface` / `type` keyword                              → yes
+///   anything else                                                        → no
+fn is_type_position(tokens: &[lang::lexer::Token], tok_pos: usize, line: &str) -> bool {
+	let mut idx = tok_pos;
+	loop {
+		let prev = tokens[..idx].iter().enumerate().rev()
+			.find(|(_, t)| t.kind != TokenKind::Whitespace);
+		let Some((prev_idx, prev_tok)) = prev else { return false; };
+		let s = &line[prev_tok.range.clone()];
+		match prev_tok.kind {
+			// Type modifiers — keep scanning further back
+			TokenKind::Operator if s == "*" || s == "&" => { idx = prev_idx; }
+			TokenKind::Punct    if s == "?"             => { idx = prev_idx; }
+			// Colon: definitely a type annotation
+			TokenKind::Punct    if s == ":" => return true,
+			// Arrow: return-type when preceded by `)`, member-access otherwise
+			TokenKind::Operator if s == "->" => {
+				return tokens[..prev_idx].iter().rev()
+					.find(|t| t.kind != TokenKind::Whitespace)
+					.map(|t| t.kind == TokenKind::Punct && &line[t.range.clone()] == ")")
+					.unwrap_or(false);
+			}
+			// Type-defining keywords
+			TokenKind::Keyword => {
+				return matches!(s, "struct" | "interface" | "type");
+			}
+			_ => return false,
+		}
+	}
+}
+
+/// Scan every KSL line for tokens whose text equals `name` and classify each
+/// occurrence as Definition / Write / Read / TypeRef based on neighbouring tokens.
+///
+/// Role heuristics:
+///   • In type-annotation position (after `:`, `->`, or a type keyword) → TypeRef
+///   • Preceded by `let` or `var`                                        → Definition
+///   • Followed by `=` (not `==`)                                        → Write
+///   • Everything else                                                   → Read
 fn find_var_occurrences(name: &str, lines: &[HighlightedLine]) -> Vec<VarOccurrence> {
 	let mut result = Vec::new();
 
@@ -430,7 +475,13 @@ fn find_var_occurrences(name: &str, lines: &[HighlightedLine]) -> Vec<VarOccurre
 				.find(|t| t.kind != TokenKind::Whitespace)
 				.map(|t| (t.kind, &line.text[t.range.clone()]));
 
-			let role = if matches!(&prev_kind, Some((TokenKind::Keyword, kw)) if *kw == "let" || *kw == "var") {
+			let role = if is_type_position(&tokens, tok_pos, &line.text) {
+				VarRole::TypeRef
+			} else if matches!(&prev_kind, Some((TokenKind::Keyword, kw)) if matches!(*kw, "let" | "var" | "fn")) {
+				// let x / var x / fn name(…)
+				VarRole::Definition
+			} else if matches!(&next, Some((TokenKind::Punct, p)) if *p == ":") {
+				// name: Type  — function parameter or struct field binding
 				VarRole::Definition
 			} else if matches!(&next, Some((TokenKind::Operator, op)) if *op == "=") {
 				VarRole::Write
@@ -574,16 +625,14 @@ impl KaisekiState {
 
 			rows.push(DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label });
 
-			if let Some(si) = span_idx {
-				if self.expanded_spans.contains(&si) {
-					let range = self.source_map[si].source_lines.clone();
-					let last  = range.end.saturating_sub(1);
-					for source_idx in range {
-						rows.push(DisplayRow::SourceLine {
-							source_idx,
-							is_last: source_idx == last,
-						});
-					}
+			if let Some(si) = span_idx && self.expanded_spans.contains(&si) {
+				let range = self.source_map[si].source_lines.clone();
+				let last  = range.end.saturating_sub(1);
+				for source_idx in range {
+					rows.push(DisplayRow::SourceLine {
+						source_idx,
+						is_last: source_idx == last,
+					});
 				}
 			}
 		}
@@ -688,8 +737,8 @@ impl canvas::Program<Message> for CodeCanvas {
 				}
 
 				// ── Variable identifier click ─────────────────────────────────
-				if pos.x >= GUTTER_W {
-					let char_col = ((pos.x - GUTTER_W) / CHAR_W) as usize;
+				if pos.x >= CODE_X {
+					let char_col = ((pos.x - CODE_X) / CHAR_W) as usize;
 					let line     = &self.ksl_lines[*ksl_idx];
 					for token in lang::lexer::tokenize(&line.text) {
 						if token.kind == TokenKind::Ident
@@ -742,8 +791,8 @@ impl canvas::Program<Message> for CodeCanvas {
 
 					// Variable occurrence background tints
 					for occ in self.var_occurrences.iter().filter(|o| o.ksl_line_idx == *ksl_idx) {
-						let x0 = GUTTER_W + occ.byte_range.start as f32 * CHAR_W;
-						let x1 = GUTTER_W + occ.byte_range.end as f32 * CHAR_W;
+						let x0 = CODE_X + occ.byte_range.start as f32 * CHAR_W;
+						let x1 = CODE_X + occ.byte_range.end as f32 * CHAR_W;
 						frame.fill_rectangle(
 							Point::new(x0, y),
 							Size::new(x1 - x0, ROW_H),
@@ -752,7 +801,7 @@ impl canvas::Program<Message> for CodeCanvas {
 					}
 
 					draw_gutter(&mut frame, *ksl_idx + 1, y, GUTTER_FG);
-					draw_line(&mut frame, line, GUTTER_W, y + 4.5);
+					draw_line(&mut frame, line, CODE_X, y + 4.5);
 
 					if span_idx.is_some() {
 						draw_accordion_btn(&mut frame, bounds.width, y, *is_expanded, label);
@@ -776,18 +825,16 @@ impl canvas::Program<Message> for CodeCanvas {
 					);
 
 					draw_gutter(&mut frame, *source_idx + 1, y, GUTTER_DIM);
-					draw_line(&mut frame, line, GUTTER_W, y + 4.5);
+					draw_line(&mut frame, line, CODE_X, y + 4.5);
 				}
 			}
 		}
 
-		// Connection gutter: rail, arrows, leader lines, dots
+		// Connection gutter: rail + dots in the left margin
 		if !self.var_occurrences.is_empty() {
 			draw_connection_gutter(
 				&mut frame,
-				bounds,
 				&self.display_rows,
-				&self.ksl_lines,
 				&self.var_occurrences,
 			);
 		}
@@ -813,11 +860,11 @@ fn accordion_btn_width(label: &str) -> f32 {
 	(5 + label.len()) as f32 * CHAR_W + 16.0
 }
 
-/// Render a right-aligned line number into the gutter column.
+/// Render a right-aligned line number into the gutter column (right of CONN_GUTTER_W).
 fn draw_gutter(frame: &mut canvas::Frame, num: usize, y: f32, color: Color) {
 	let s      = num.to_string();
 	let text_w = s.len() as f32 * CHAR_W;
-	let x      = GUTTER_W - 16.0 - text_w;
+	let x      = CODE_X - 16.0 - text_w;
 	draw_text(frame, &s, x, y + 4.5, color);
 }
 
@@ -883,39 +930,35 @@ fn draw_text(frame: &mut canvas::Frame, content: &str, x: f32, y: f32, color: Co
 
 // ── Connection gutter ─────────────────────────────────────────────────────────
 //
-// Renders the variable-occurrence visualisation directly in the code canvas.
-// Because the canvas scrolls with the content, dots sit exactly at the y
-// position of the rows they annotate — no scroll-offset correction needed.
+// Drawn in the CONN_GUTTER_W strip to the LEFT of the line-number gutter.
+// The canvas scrolls with the content so dots sit at the exact row y.
 //
-//   │←── gutter 56px ──→│←── code ──────────→│ DOT_FROM_RIGHT │
-//   │                    │                    │                │
-//   │                    │ let local_90 = …   ├────────────────● def (lavender)
-//   │                    │                    │                │
-//   │                    │ local_90 = val;    ├───────────────●  write (yellow)
-//   │                    │                    │                │
-//   │                    │ foo(local_90)       ├──────────────●─┘ read (teal)
+//   ┌─ CONN_GUTTER_W (20 px) ─┬─ GUTTER_W ─┬─ code ────────
+//   │  ●  def  (lavender)     │   line #   │ let local_90 …
+//   │  │                      │            │ foo(x)
+//   │  ●  read (teal)         │            │ local_90 = …
+//   │  │                      │            │ …
+//   │  ●  write (yellow)      │            │ bar(local_90)
 
 fn draw_connection_gutter(
 	frame:        &mut canvas::Frame,
-	bounds:       Rectangle,
 	display_rows: &[DisplayRow],
-	lines:        &[HighlightedLine],
 	occurrences:  &[VarOccurrence],
 ) {
-	let dot_x = bounds.width - DOT_FROM_RIGHT;
+	// Dot is centered horizontally inside CONN_GUTTER_W.
+	let dot_x = CONN_GUTTER_W / 2.0;
 
-	struct Entry { y: f32, role: VarRole, text_len: usize }
+	struct Entry { y: f32, role: VarRole }
 
 	let entries: Vec<Entry> = occurrences
 		.iter()
+		.filter(|occ| occ.role != VarRole::TypeRef) // type names are not data flow
 		.filter_map(|occ| {
-			// Find the display-list index of the KSL row that holds this occurrence.
 			let display_idx = display_rows.iter().position(|r| {
 				matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx)
 			})?;
-			let y        = TOP_PAD + display_idx as f32 * ROW_H + ROW_H / 2.0;
-			let text_len = lines.get(occ.ksl_line_idx).map(|l| l.text.len()).unwrap_or(0);
-			Some(Entry { y, role: occ.role, text_len })
+			let y = TOP_PAD + display_idx as f32 * ROW_H + ROW_H / 2.0;
+			Some(Entry { y, role: occ.role })
 		})
 		.collect();
 
@@ -935,34 +978,76 @@ fn draw_connection_gutter(
 		);
 	}
 
-	// ── Direction arrows between consecutive occurrences ──────────────────────
-	for pair in entries.windows(2) {
-		let y_mid = (pair[0].y + pair[1].y) / 2.0;
-		let mut path = canvas::path::Builder::new();
-		path.move_to(Point::new(dot_x - ARROW_W / 2.0, y_mid - ARROW_H / 2.0));
-		path.line_to(Point::new(dot_x + ARROW_W / 2.0, y_mid - ARROW_H / 2.0));
-		path.line_to(Point::new(dot_x, y_mid + ARROW_H / 2.0));
-		path.close();
-		frame.fill(&path.build(), ARROW_COL);
-	}
+	// ── Per-role arrow markers ────────────────────────────────────────────────
+	//
+	//   Definition (green)   ↓  downward triangle on the rail — source of flow
+	//   Read       (blue)    ──▶  tick + rightward triangle  — value flows out to code
+	//   Write      (yellow)  ──◀  tick + leftward triangle   — value flows in from code
+	//
+	// tick_x1 is placed just left of the line-number column so the arrow tip
+	// sits flush against the numbers with a small gap, regardless of digit count.
+	let tick_x0  = dot_x + DOT_R + 2.0;
+	let depth    = 6.0; // arrowhead depth  (along the dominant axis)
+	let half     = 4.0; // arrowhead half-width (perpendicular axis)
 
-	// ── Leader lines + role-coloured dots ─────────────────────────────────────
+	// Compute tick_x1 so the arrow tip lands just left of the line numbers.
+	let max_line_num = display_rows.iter()
+		.filter_map(|r| if let DisplayRow::KslLine { ksl_idx, .. } = r { Some(ksl_idx + 1) } else { None })
+		.max()
+		.unwrap_or(1);
+	let num_digits = max_line_num.to_string().len();
+	let tick_x1 = CODE_X - 16.0 - num_digits as f32 * CHAR_W - 4.0;
+
 	for entry in &entries {
-		let text_end_x = GUTTER_W + entry.text_len as f32 * CHAR_W;
-		let lx0        = text_end_x + LEADER_GAP;
-		let lx1        = dot_x - DOT_R - LEADER_GAP;
-		if lx1 > lx0 {
-			frame.fill_rectangle(
-				Point::new(lx0, entry.y - 0.5),
-				Size::new(lx1 - lx0, 1.0),
-				LEADER_COL,
-			);
-		}
+		let color = var_dot(entry.role);
 
-		// Role-coloured circle dot
-		let mut path = canvas::path::Builder::new();
-		path.circle(Point::new(dot_x, entry.y), DOT_R);
-		frame.fill(&path.build(), var_dot(entry.role));
+		match entry.role {
+			VarRole::Definition => {
+				// ↓ downward triangle centred on (dot_x, entry.y)
+				let mut path = canvas::path::Builder::new();
+				path.move_to(Point::new(dot_x,        entry.y + depth * 0.5)); // tip
+				path.line_to(Point::new(dot_x - half, entry.y - depth * 0.5)); // top-left
+				path.line_to(Point::new(dot_x + half, entry.y - depth * 0.5)); // top-right
+				path.close();
+				frame.fill(&path.build(), color);
+			}
+			VarRole::Read => {
+				// ──▶  tick + right-pointing triangle at tick_x1
+				let line_end = tick_x1 - depth;
+				if line_end > tick_x0 {
+					frame.fill_rectangle(
+						Point::new(tick_x0, entry.y - 0.5),
+						Size::new(line_end - tick_x0, 1.0),
+						color,
+					);
+				}
+				let mut path = canvas::path::Builder::new();
+				path.move_to(Point::new(tick_x1,         entry.y));        // tip (right)
+				path.line_to(Point::new(tick_x1 - depth, entry.y - half)); // base top
+				path.line_to(Point::new(tick_x1 - depth, entry.y + half)); // base bottom
+				path.close();
+				frame.fill(&path.build(), color);
+			}
+			VarRole::Write => {
+				// ──◀  tick + left-pointing triangle at tick_x1
+				// The open base faces the code (right); tip points back toward the variable.
+				let line_end = tick_x1 - depth;
+				if line_end > tick_x0 {
+					frame.fill_rectangle(
+						Point::new(tick_x0, entry.y - 0.5),
+						Size::new(line_end - tick_x0, 1.0),
+						color,
+					);
+				}
+				let mut path = canvas::path::Builder::new();
+				path.move_to(Point::new(tick_x1 - depth, entry.y));        // tip (left)
+				path.line_to(Point::new(tick_x1,         entry.y - half)); // base top-right
+				path.line_to(Point::new(tick_x1,         entry.y + half)); // base bottom-right
+				path.close();
+				frame.fill(&path.build(), color);
+			}
+			VarRole::TypeRef => {}
+		}
 	}
 }
 

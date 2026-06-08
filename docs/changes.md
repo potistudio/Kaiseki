@@ -1,5 +1,47 @@
 # Changes
 
+## feat: 接続ガター左マージン移動・役割矢印・型参照除外
+
+### 接続ガター — 右端 → 行番号左の専用カラムへ移動
+
+レイアウトを 3 カラム構成に変更。
+
+```
+┌─ CONN_GUTTER_W (28px) ─┬─ GUTTER_W (56px) ─┬─ code ──
+│  rail / arrows         │  line numbers     │
+```
+
+- `CONN_GUTTER_W = 28.0`、`CODE_X = CONN_GUTTER_W + GUTTER_W` 定数を追加。
+- `draw_gutter` / `draw_line` / クリック判定 / 背景ハイライトのすべての x 座標を `CODE_X` 基準に統一。
+- `draw_connection_gutter` から `bounds` / `lines` 引数を削除（左ガター固定なので不要）。
+- リーダー線・右端クランプを廃止。ティック末端は行番号の桁数から動的に計算。
+
+### 役割ごとの矢印マーカー
+
+| ロール | 形状 | 色 |
+| ------ | ---- | -- |
+| Definition | ↓ 縦三角（レール上） | GREEN `#a6e3a1` |
+| Read | `──▶` ティック＋右向き三角 | BLUE `#89b4fa` |
+| Write | `──◀` ティック＋左向き三角 | YELLOW `#f9e2af` |
+
+- `BLUE = #89b4fa`（Catppuccin Blue）を追加。不要になった `LAVENDER`・`TEAL`・`ARROW_COL`・`LEADER_COL` を削除。
+
+### VarRole::TypeRef — 型参照の除外
+
+- `VarRole::TypeRef` バリアント追加。型名位置の識別子（`: Type`、`struct Name`、`-> ReturnType` 等）を検出。
+- 型参照は背景ハイライトを薄いグレーで表示するが、接続ガター（レール・矢印）には描画しない。
+- `is_type_position()` 関数: トークン列を後ろ向きスキャンして型修飾子（`*` `&` `?`）を読み飛ばし、`:` / `->（戻り値位置のみ）` / 型定義キーワードで判定。
+
+### Definition 検出の拡張
+
+`let`/`var` 直後のみだった定義検出を以下に拡張：
+
+| パターン | 例 | 検出方法 |
+| -------- | -- | -------- |
+| `let x` / `var x` | `let stream = …` | 直前が `let`/`var` |
+| `fn name(…)` | `fn get_stream_fpv(…)` | 直前が `fn` |
+| `name: Type` | `layer: *BEE_Layer` | 直後が `:` |
+
 ## refactor: GPUI → Iced 全面再実装
 
 UIフレームワークを gpui 0.2.2 から **iced 0.13** に切り替えて全面書き直し。
