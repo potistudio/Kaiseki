@@ -8,5 +8,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gpui = "0.2.2"
+iced = { version = "0.13", features = ["canvas"] }
 syntect = "5"

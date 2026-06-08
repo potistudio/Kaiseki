@@ -1,5 +1,37 @@
 # Changes
 
+## refactor: GPUI → Iced 全面再実装
+
+UIフレームワークを gpui 0.2.2 から **iced 0.13** に切り替えて全面書き直し。
+機能・ビジュアルはすべて保持。
+
+### アーキテクチャ変更点
+
+| 項目 | GPUI版 | Iced版 |
+|------|--------|--------|
+| 状態管理 | `KaisekiApp` + `cx.notify()` | `KaisekiState` + Elm MEV |
+| コードパネル | `uniform_list` + `StyledText` | 1枚の `canvas::Program` |
+| スクロール | `UniformListScrollHandle` + スムーズスクロール独自実装 | `scrollable` ウィジェット |
+| 接続ガター | 別建て absolute overlay canvas | コードcanvasに統合 |
+| クリック検出 | `on_mouse_down` + pixel→char変換 | `canvas::Program::update` |
+| アコーディオン | `on_mouse_down` per-span クロージャ | canvas内 hit-test で Message 発行 |
+
+### 主要実装
+
+- `KaisekiState::new / update / view` — Iced functional API エントリポイント
+- `CodeCanvas` — `canvas::Program<Message>` 実装。全行描画 + マウスイベント処理を1クラスに集約
+- `draw_line` — KSL / C ソース両対応のシンタックスハイライト描画（highlight span間のギャップをデフォルト色で補完）
+- `draw_connection_gutter` — 接続ガター（縦レール・矢印・リーダー線・役割色ドット）を同一canvasに描画
+- `panel_header` — iced ウィジェットで構成したパネルヘッダー（KSL バッジ付き）
+- `build_ksl_lines` / `build_source_lines` — 起動時に全行をハイライト済みに変換して `Arc` で共有
+
+### Cargo.toml
+
+```
+- gpui = "0.2.2"
++ iced = { version = "0.13", features = ["canvas"] }
+```
+
 ## update: Variable highlighting — click-activate + text-end leader lines
 
 前バージョンからの差分。

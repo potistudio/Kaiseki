@@ -1,13 +1,23 @@
 mod lang;
 
-use gpui::{prelude::*, *};
 use std::{collections::HashSet, ops::Range, sync::Arc};
+
+use iced::{
+	alignment, mouse,
+	widget::{canvas, column, container, row, scrollable},
+	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Task,
+};
 use syntect::{
 	easy::HighlightLines,
-	highlighting::{FontStyle as SyntectFontStyle, ThemeSet},
+	highlighting::ThemeSet,
 	parsing::SyntaxSet,
 	util::LinesWithEndings,
 };
+
+use lang::{SourceSpan, SAMPLE_KSL, SAMPLE_SOURCE_MAP};
+use lang::lexer::TokenKind;
+
+// ── Sample decompiled-C source (Ghidra output for NIM_GetStreamFPV) ───────────
 
 const SAMPLE_CODE: &str = r#"
 /* void __cdecl NIM_GetStreamFPV(class BEE_Layer * __ptr64,class TDB_StreamIDPath const &
@@ -204,197 +214,202 @@ LAB_180e2b65e:
 
 "#;
 
-// -- Data model ---------------------------------------------------------------
+// ── Layout constants (match the original GPUI version) ────────────────────────
 
-struct HighlightedLine {
-	text: SharedString,
-	highlights: Vec<(Range<usize>, HighlightStyle)>,
+const ROW_H:          f32 = 22.0;
+const GUTTER_W:       f32 = 56.0;
+const CHAR_W:         f32 = 7.8; // approx. Consolas 13 px glyph advance
+const FONT_SIZE:      f32 = 13.0;
+const TOP_PAD:        f32 = 8.0;
+
+// Connection gutter geometry
+const DOT_FROM_RIGHT: f32 = 16.0;
+const LEADER_GAP:     f32 = 6.0;
+const DOT_R:          f32 = 3.0;
+const RAIL_W:         f32 = 2.0;
+const ARROW_W:        f32 = 5.0;
+const ARROW_H:        f32 = 4.0;
+
+// ── Color palette (Catppuccin Mocha) ─────────────────────────────────────────
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+	Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
 }
 
-// ── Variable-highlight types ──────────────────────────────────────────────────
+const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
+	Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 }
+}
+
+const BASE:           Color = rgb(0x1e, 0x1e, 0x2e);
+const MANTLE:         Color = rgb(0x18, 0x18, 0x25);
+const SURFACE0:       Color = rgb(0x31, 0x32, 0x44);
+const OVERLAY0:       Color = rgb(0x6c, 0x70, 0x86);
+const SUBTEXT1:       Color = rgb(0xba, 0xc2, 0xde);
+const SUBTEXT0:       Color = rgb(0xa6, 0xad, 0xc8);
+const TEXT_COL:       Color = rgb(0xcd, 0xd6, 0xf4);
+const LAVENDER:       Color = rgb(0xb4, 0xbe, 0xfe);
+const SKY:            Color = rgb(0x89, 0xdc, 0xeb);
+const TEAL:           Color = rgb(0x94, 0xe2, 0xd5);
+const GREEN:          Color = rgb(0xa6, 0xe3, 0xa1);
+const YELLOW:         Color = rgb(0xf9, 0xe2, 0xaf);
+const PEACH:          Color = rgb(0xfa, 0xb3, 0x87);
+const MAUVE:          Color = rgb(0xcb, 0xa6, 0xf7);
+
+const GUTTER_FG:      Color = rgba(0x58, 0x5b, 0x70, 0xff);
+const GUTTER_DIM:     Color = rgba(0x58, 0x5b, 0x70, 0x44);
+const SNIPPET_BG:     Color = rgba(0x18, 0x18, 0x25, 0xdd);
+const ACCORDION_FG:   Color = rgba(0xe6, 0x89, 0x45, 0xcc);
+const ACCORDION_BG:   Color = rgba(0x31, 0x32, 0x44, 0x88);
+const SNIPPET_BORDER: Color = rgba(0xe6, 0x89, 0x45, 0x66);
+const RAIL_COL:       Color = rgba(0x58, 0x5b, 0x70, 0x88);
+const ARROW_COL:      Color = rgba(0x58, 0x5b, 0x70, 0xcc);
+const LEADER_COL:     Color = rgba(0x58, 0x5b, 0x70, 0x66);
+const SAPPHIRE_DIM:   Color = rgba(0x74, 0xc7, 0xec, 0x99);
+
+const fn var_bg(role: VarRole) -> Color {
+	match role {
+		VarRole::Definition => rgba(0xb4, 0xbe, 0xfe, 0x55),
+		VarRole::Write      => rgba(0xf9, 0xe2, 0xaf, 0x55),
+		VarRole::Read       => rgba(0x94, 0xe2, 0xd5, 0x55),
+	}
+}
+
+const fn var_dot(role: VarRole) -> Color {
+	match role {
+		VarRole::Definition => LAVENDER,
+		VarRole::Write      => YELLOW,
+		VarRole::Read       => TEAL,
+	}
+}
+
+// ── Domain types ──────────────────────────────────────────────────────────────
+
+/// One syntax-highlighted line: the raw text plus a list of (byte-range, colour) spans.
+#[derive(Clone, Debug)]
+struct HighlightedLine {
+	text:       String,
+	/// (byte_range, foreground_color) — non-overlapping, source order.
+	highlights: Vec<(Range<usize>, Color)>,
+}
 
 /// Semantic role of one identifier occurrence within the KSL source.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VarRole {
-	/// Binding point: `let name = …` or `var name`.
 	Definition,
-	/// Assignment to an already-bound name: `name = expr`.
 	Write,
-	/// All other usages (reads, function args, return values, …).
 	Read,
 }
 
-/// One occurrence of a variable name that should be highlighted.
-#[derive(Clone)]
+/// One occurrence of the active variable that should be highlighted.
+#[derive(Clone, Debug)]
 struct VarOccurrence {
 	ksl_line_idx: usize,
 	byte_range:   Range<usize>,
 	role:         VarRole,
 }
 
-struct SmoothScroll {
-	current_y: f32,
-	target_y: f32,
-	animating: bool,
+/// Flat display-list entry, either a KSL line or an expanded C source line.
+#[derive(Clone, Debug)]
+enum DisplayRow {
+	KslLine {
+		ksl_idx:     usize,
+		span_idx:    Option<usize>, // Some → this row carries the accordion toggle button
+		is_expanded: bool,
+		label:       &'static str,
+	},
+	SourceLine { source_idx: usize, is_last: bool },
 }
 
-struct Panel {
-	lines: Arc<Vec<HighlightedLine>>,
-	scroll_handle: UniformListScrollHandle,
-	smooth: SmoothScroll,
+// ── KSL syntax highlighting ───────────────────────────────────────────────────
+
+fn token_color(kind: TokenKind) -> Option<Color> {
+	Some(match kind {
+		TokenKind::Keyword    => MAUVE,
+		TokenKind::Atom       => PEACH,
+		TokenKind::Number | TokenKind::Offset => YELLOW,
+		TokenKind::DocComment => GREEN,
+		TokenKind::SectionSep => SAPPHIRE_DIM,
+		TokenKind::Comment    => OVERLAY0,
+		TokenKind::Operator   => SKY,
+		TokenKind::Punct      => SUBTEXT1,
+		TokenKind::Ident      => TEXT_COL,
+		TokenKind::Whitespace | TokenKind::Unknown => return None,
+	})
 }
 
-impl Panel {
-	/// Build a panel from KSL source using the built-in KSL lexer.
-	fn from_ksl(source: &str) -> Self {
-		let lines = source
-			.lines()
-			.map(|line| HighlightedLine {
-				text: line.to_string().into(),
-				highlights: ksl_highlight_line(line),
-			})
-			.collect();
-		Self {
-			lines: Arc::new(lines),
-			scroll_handle: UniformListScrollHandle::new(),
-			smooth: SmoothScroll {
-				current_y: 0.0,
-				target_y: 0.0,
-				animating: false,
-			},
-		}
-	}
-
-	/// Build a panel from arbitrary source using syntect for highlighting.
-	fn from_code(code: &str, lang_ext: &str) -> Self {
-		let ss = SyntaxSet::load_defaults_newlines();
-		let ts = ThemeSet::load_defaults();
-		let theme = &ts.themes["base16-ocean.dark"];
-		let syntax = ss
-			.find_syntax_by_extension(lang_ext)
-			.unwrap_or_else(|| ss.find_syntax_plain_text());
-		let mut hl = HighlightLines::new(syntax, theme);
-
-		let lines: Vec<HighlightedLine> = LinesWithEndings::from(code)
-			.map(|line| {
-				let ranges = hl.highlight_line(line, &ss).unwrap_or_default();
-				let mut text = String::new();
-				let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-				let mut offset = 0usize;
-
-				for (style, frag) in &ranges {
-					let end = offset + frag.len();
-					highlights.push((
-						offset..end,
-						HighlightStyle {
-							color: Some(syntect_to_hsla(style.foreground)),
-							font_weight: style
-								.font_style
-								.contains(SyntectFontStyle::BOLD)
-								.then_some(FontWeight::BOLD),
-							font_style: style
-								.font_style
-								.contains(SyntectFontStyle::ITALIC)
-								.then_some(FontStyle::Italic),
-							..Default::default()
-						},
-					));
-					text.push_str(frag);
-					offset = end;
-				}
-
-				// Strip trailing newline and clamp highlight ranges to match.
-				if text.ends_with('\n') {
-					text.pop();
-					let len = text.len();
-					for (r, _) in &mut highlights {
-						r.end = r.end.min(len);
-					}
-					highlights.retain(|(r, _)| r.start < r.end);
-				}
-
-				HighlightedLine {
-					text: text.into(),
-					highlights,
-				}
-			})
-			.collect();
-
-		Self {
-			lines: Arc::new(lines),
-			scroll_handle: UniformListScrollHandle::new(),
-			smooth: SmoothScroll {
-				current_y: 0.0,
-				target_y: 0.0,
-				animating: false,
-			},
-		}
-	}
-}
-
-// -- KSL syntax highlighting --------------------------------------------------
-
-// Catppuccin Mocha palette — matched to KSL token roles.
-//
-//   Token role    Color name   Hex
-//   ────────────  ───────────  ──────────
-//   Keyword       Mauve        #cba6f7
-//   Atom          Peach        #fab387
-//   Number/Offset Yellow       #f9e2af
-//   DocComment    Green        #a6e3a1
-//   SectionSep    Sapphire     #74c7ec  (dimmed)
-//   Comment       Overlay0     #6c7086
-//   Operator      Sky          #89dceb
-//   Punct         Subtext1     #bac2de
-//   Ident         Text         #cdd6f4
-
-fn ksl_highlight_line(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
-	use lang::lexer::TokenKind;
-	lang::lexer::tokenize(line)
-		.into_iter()
-		.filter_map(|token| {
-			let color: Option<Hsla> = match token.kind {
-				TokenKind::Keyword => Some(rgba(0xcba6f7ff).into()),
-				TokenKind::Atom => Some(rgba(0xfab387ff).into()),
-				TokenKind::Number | TokenKind::Offset => Some(rgba(0xf9e2afff).into()),
-				TokenKind::DocComment => Some(rgba(0xa6e3a1ff).into()),
-				TokenKind::SectionSep => Some(rgba(0x74c7ec99).into()),
-				TokenKind::Comment => Some(rgba(0x6c7086ff).into()),
-				TokenKind::Operator => Some(rgba(0x89dcebff).into()),
-				TokenKind::Punct => Some(rgba(0xbac2deff).into()),
-				TokenKind::Ident => Some(rgba(0xcdd6f4ff).into()),
-				// Whitespace and unknown bytes carry no highlight.
-				TokenKind::Whitespace | TokenKind::Unknown => None,
-			};
-			color.map(|c| {
-				(
-					token.range,
-					HighlightStyle {
-						color: Some(c),
-						..Default::default()
-					},
-				)
-			})
+fn build_ksl_lines(source: &str) -> Vec<HighlightedLine> {
+	source
+		.lines()
+		.map(|line| {
+			let highlights = lang::lexer::tokenize(line)
+				.into_iter()
+				.filter_map(|t| token_color(t.kind).map(|c| (t.range, c)))
+				.collect();
+			HighlightedLine { text: line.to_string(), highlights }
 		})
 		.collect()
 }
 
-// -- Variable-occurrence analysis ---------------------------------------------
+// ── Syntect code highlighting ─────────────────────────────────────────────────
+
+fn build_source_lines(code: &str) -> Vec<HighlightedLine> {
+	let ss     = SyntaxSet::load_defaults_newlines();
+	let ts     = ThemeSet::load_defaults();
+	let theme  = &ts.themes["base16-ocean.dark"];
+	let syntax = ss
+		.find_syntax_by_extension("cpp")
+		.unwrap_or_else(|| ss.find_syntax_plain_text());
+	let mut hl = HighlightLines::new(syntax, theme);
+
+	LinesWithEndings::from(code)
+		.map(|line| {
+			let ranges = hl.highlight_line(line, &ss).unwrap_or_default();
+			let mut text = String::new();
+			let mut highlights: Vec<(Range<usize>, Color)> = Vec::new();
+			let mut offset = 0usize;
+
+			for (style, frag) in &ranges {
+				let end = offset + frag.len();
+				let fg = Color {
+					r: style.foreground.r as f32 / 255.0,
+					g: style.foreground.g as f32 / 255.0,
+					b: style.foreground.b as f32 / 255.0,
+					a: style.foreground.a as f32 / 255.0,
+				};
+				highlights.push((offset..end, fg));
+				text.push_str(frag);
+				offset = end;
+			}
+
+			// Strip the trailing newline syntect adds; clamp highlight ranges to match.
+			if text.ends_with('\n') {
+				text.pop();
+				let len = text.len();
+				for (r, _) in &mut highlights {
+					r.end = r.end.min(len);
+				}
+				highlights.retain(|(r, _)| r.start < r.end);
+			}
+
+			HighlightedLine { text, highlights }
+		})
+		.collect()
+}
+
+// ── Variable analysis ─────────────────────────────────────────────────────────
 
 /// Scan every KSL line for tokens whose text equals `name` and classify each
 /// occurrence as Definition / Write / Read based on neighbouring tokens.
 ///
-/// Role heuristics:
-///   • Preceded by `let` or `var` keyword          → Definition
-///   • Followed by `=` operator (but not `==`)     → Write
-///   • Everything else                             → Read
-fn find_var_occurrences(name: &str, lines: &Arc<Vec<HighlightedLine>>) -> Vec<VarOccurrence> {
-	use lang::lexer::{TokenKind, tokenize};
-
+/// Role heuristics (same as GPUI version):
+///   • Preceded by `let` or `var`     → Definition
+///   • Followed by `=` (not `==`)     → Write
+///   • Everything else                → Read
+fn find_var_occurrences(name: &str, lines: &[HighlightedLine]) -> Vec<VarOccurrence> {
 	let mut result = Vec::new();
 
 	for (line_idx, line) in lines.iter().enumerate() {
-		let tokens = tokenize(&line.text);
+		let tokens = lang::lexer::tokenize(&line.text);
 
 		for (tok_pos, token) in tokens.iter().enumerate() {
 			if token.kind != TokenKind::Ident {
@@ -404,14 +419,12 @@ fn find_var_occurrences(name: &str, lines: &Arc<Vec<HighlightedLine>>) -> Vec<Va
 				continue;
 			}
 
-			// Walk backwards over whitespace to find preceding non-ws token.
 			let prev_kind = tokens[..tok_pos]
 				.iter()
 				.rev()
 				.find(|t| t.kind != TokenKind::Whitespace)
 				.map(|t| (t.kind, &line.text[t.range.clone()]));
 
-			// Walk forwards over whitespace to find following non-ws token.
 			let next = tokens[tok_pos + 1..]
 				.iter()
 				.find(|t| t.kind != TokenKind::Whitespace)
@@ -436,210 +449,135 @@ fn find_var_occurrences(name: &str, lines: &Arc<Vec<HighlightedLine>>) -> Vec<Va
 	result
 }
 
-/// Build the additional highlight spans caused by a hovered variable on one
-/// line.  Uses `background_color` so that the syntax foreground color is
-/// preserved — both fields coexist in `HighlightStyle`.
-///
-/// Color palette (Catppuccin Mocha tints at ~33 % opacity):
-///   Definition  →  Lavender  #b4befe55
-///   Write       →  Yellow    #f9e2af55
-///   Read        →  Teal      #94e2d555
-fn hover_highlights_for_line(
-	occurrences: &[VarOccurrence],
-	ksl_line_idx: usize,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-	occurrences
-		.iter()
-		.filter(|o| o.ksl_line_idx == ksl_line_idx)
-		.map(|o| {
-			let bg: Hsla = match o.role {
-				VarRole::Definition => rgba(0xb4befe55).into(),
-				VarRole::Write      => rgba(0xf9e2af55).into(),
-				VarRole::Read       => rgba(0x94e2d555).into(),
-			};
-			(
-				o.byte_range.clone(),
-				HighlightStyle {
-					background_color: Some(bg),
-					..Default::default()
-				},
-			)
-		})
-		.collect()
-}
+// ── Application state ─────────────────────────────────────────────────────────
 
-// -- Color helpers ------------------------------------------------------------
-
-fn syntect_to_hsla(c: syntect::highlighting::Color) -> Hsla {
-	Rgba {
-		r: c.r as f32 / 255.0,
-		g: c.g as f32 / 255.0,
-		b: c.b as f32 / 255.0,
-		a: c.a as f32 / 255.0,
-	}
-	.into()
-}
-
-// -- Smooth-scroll helpers ----------------------------------------------------
-
-/// Advance one animation tick for a panel's smooth-scroll state.
-/// Mutates `panel.smooth` and repositions the underlying scroll offset.
-fn advance_smooth_scroll(panel: &mut Panel, window: &mut Window) {
-	if !panel.smooth.animating {
-		return;
-	}
-	let diff = panel.smooth.target_y - panel.smooth.current_y;
-	if diff.abs() < 0.5 {
-		panel.smooth.current_y = panel.smooth.target_y;
-		panel.smooth.animating = false;
-	} else {
-		panel.smooth.current_y += diff * 0.18;
-		window.request_animation_frame();
-	}
-	let base = panel.scroll_handle.0.borrow().base_handle.clone();
-	base.set_offset(point(px(0.0), px(panel.smooth.current_y)));
-}
-
-/// Process a scroll-wheel event for one panel.
-/// Returns `true` when a re-render should be requested via `cx.notify()`.
-fn handle_panel_scroll(panel: &mut Panel, event: &ScrollWheelEvent, window: &mut Window) -> bool {
-	let actual_y = panel.scroll_handle.0.borrow().base_handle.offset().y.to_f64() as f32;
-
-	if event.delta.precise() {
-		// Touchpad: stay in sync, let GPUI drive natively.
-		panel.smooth.current_y = actual_y;
-		panel.smooth.target_y = actual_y;
-		return false;
-	}
-
-	// Mouse wheel: undo the instant scroll GPUI already applied, drive our animation.
-	let line_height = window.line_height();
-	let delta_y = event.delta.pixel_delta(line_height).y.to_f64() as f32;
-
-	{
-		let state = panel.scroll_handle.0.borrow();
-		state.base_handle.set_offset(point(px(0.0), px(panel.smooth.current_y)));
-	}
-
-	panel.smooth.target_y += delta_y;
-	if let Some(size) = panel.scroll_handle.0.borrow().last_item_size {
-		let max_neg = -(size.contents.height.to_f64() - size.item.height.to_f64()).max(0.0) as f32;
-		panel.smooth.target_y = panel.smooth.target_y.max(max_neg).min(0.0);
-	}
-
-	panel.smooth.animating = true;
-	true
-}
-
-// -- Code row element ---------------------------------------------------------
-
-fn render_code_row(num: String, text: SharedString, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Div {
-	div()
-		.h(px(22.))
-		.flex()
-		.flex_row()
-		.items_center()
-		.font_family("Consolas")
-		.text_size(px(13.))
-		// Gutter
-		.child(
-			div()
-				.w(px(56.))
-				.h_full()
-				.flex()
-				.items_center()
-				.justify_end()
-				.pr(px(16.))
-				.text_size(px(12.))
-				.text_color(rgba(0x585b70ff)) // Overlay0
-				.flex_shrink_0()
-				.child(num),
-		)
-		// Syntax-highlighted text
-		.child(StyledText::new(text).with_highlights(highlights))
-}
-
-// -- Accordion display row ----------------------------------------------------
-
-/// One entry in the flattened list rendered by the KSL panel.
-/// Normal KSL lines and expanded C-source snippets share the same 22-px row
-/// height, so a single uniform_list-style loop can handle both.
-#[derive(Clone)]
-enum DisplayRow {
-	/// A normal KSL code line.  When `span_idx` is Some this line also shows
-	/// the accordion toggle button (it is the section-header comment line).
-	KslLine {
-		ksl_idx: usize,
-		span_idx: Option<usize>,
-		is_expanded: bool,
-		label: &'static str,
-	},
-	/// A decompiled-C line revealed by an open accordion entry.
-	SourceLine { source_idx: usize, is_last: bool },
-}
-
-// -- Top-level view -----------------------------------------------------------
-
-struct KaisekiApp {
-	main_panel: Panel,   // KSL lifted pseudocode (primary view)
-	source_panel: Panel, // decompiled C (accordion snippets)
-	source_map: Vec<lang::SourceSpan>,
-	expanded_spans: HashSet<usize>, // indices into source_map
-	focus_handle: FocusHandle,
-	/// Name of the identifier that was last clicked and is currently highlighted.
-	/// None when no variable is selected.  Clicking the same variable again clears it.
+struct KaisekiState {
+	ksl_lines:       Arc<Vec<HighlightedLine>>,
+	source_lines:    Arc<Vec<HighlightedLine>>,
+	source_map:      Arc<Vec<SourceSpan>>,
+	expanded_spans:  HashSet<usize>,
 	active_variable: Option<String>,
-	/// All occurrences of `active_variable` in the KSL source, with roles.
-	/// Recomputed each time `active_variable` changes.
-	var_occurrences: Vec<VarOccurrence>,
+	var_occurrences: Arc<Vec<VarOccurrence>>,
 }
 
-impl KaisekiApp {
-	fn new(cx: &mut Context<Self>) -> Self {
-		Self {
-			main_panel: Panel::from_ksl(lang::SAMPLE_KSL),
-			source_panel: Panel::from_code(SAMPLE_CODE, "cpp"),
-			source_map: lang::SAMPLE_SOURCE_MAP
-				.iter()
-				.map(|s| lang::SourceSpan {
-					label: s.label,
-					ksl_trigger_line: s.ksl_trigger_line,
-					source_lines: s.source_lines.clone(),
-				})
-				.collect(),
-			expanded_spans: HashSet::new(),
-			focus_handle: cx.focus_handle(),
+#[derive(Debug, Clone)]
+enum Message {
+	ToggleSpan(usize),
+	SetActiveVariable(Option<String>),
+}
+
+impl KaisekiState {
+	fn new() -> (Self, Task<Message>) {
+		let state = Self {
+			ksl_lines:    Arc::new(build_ksl_lines(SAMPLE_KSL)),
+			source_lines: Arc::new(build_source_lines(SAMPLE_CODE)),
+			source_map:   Arc::new(
+				SAMPLE_SOURCE_MAP
+					.iter()
+					.map(|s| SourceSpan {
+						label:            s.label,
+						ksl_trigger_line: s.ksl_trigger_line,
+						source_lines:     s.source_lines.clone(),
+					})
+					.collect(),
+			),
+			expanded_spans:  HashSet::new(),
 			active_variable: None,
-			var_occurrences: Vec::new(),
-		}
+			var_occurrences: Arc::new(Vec::new()),
+		};
+		(state, Task::none())
 	}
 
-	/// Build the flat list of display rows from the current KSL lines and
-	/// expansion state.  Expanded spans insert source-snippet rows directly
-	/// after the trigger KSL line.
+	fn update(&mut self, message: Message) -> Task<Message> {
+		match message {
+			Message::ToggleSpan(idx) => {
+				if !self.expanded_spans.remove(&idx) {
+					self.expanded_spans.insert(idx);
+				}
+			}
+			Message::SetActiveVariable(name) => {
+				self.var_occurrences = Arc::new(match &name {
+					Some(n) => find_var_occurrences(n, &self.ksl_lines),
+					None    => Vec::new(),
+				});
+				self.active_variable = name;
+			}
+		}
+		Task::none()
+	}
+
+	fn view(&self) -> Element<'_, Message> {
+		let display_rows  = Arc::new(self.build_display_rows());
+		let canvas_height = display_rows.len() as f32 * ROW_H + TOP_PAD * 2.0;
+
+		let code_canvas = CodeCanvas {
+			display_rows:    Arc::clone(&display_rows),
+			ksl_lines:       Arc::clone(&self.ksl_lines),
+			source_lines:    Arc::clone(&self.source_lines),
+			var_occurrences: Arc::clone(&self.var_occurrences),
+			source_map:      Arc::clone(&self.source_map),
+			active_variable: self.active_variable.clone(),
+		};
+
+		column![
+			// ── App title bar ────────────────────────────────────────────────
+			container(
+				iced::widget::text("kaiseki")
+					.font(Font::MONOSPACE)
+					.size(13)
+					.color(SUBTEXT0)
+			)
+			.width(Length::Fill)
+			.height(40)
+			.align_y(alignment::Vertical::Center)
+			.padding(iced::Padding::default().left(16))
+			.style(move |_| container::Style {
+				background: Some(Background::Color(MANTLE)),
+				..Default::default()
+			}),
+
+			// ── Panel header with language badge ─────────────────────────────
+			panel_header(),
+
+			// ── Scrollable code canvas ───────────────────────────────────────
+			// The canvas is given a fixed height equal to the full content height.
+			// iced's scrollable widget handles viewport clipping; the canvas renders
+			// all rows and the dots scroll with the lines they annotate.
+			scrollable(
+				canvas(code_canvas)
+					.width(Length::Fill)
+					.height(Length::Fixed(canvas_height))
+			)
+			.width(Length::Fill)
+			.height(Length::Fill),
+		]
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.into()
+	}
+
+	/// Flatten KSL lines and expanded accordion entries into a single display list.
 	fn build_display_rows(&self) -> Vec<DisplayRow> {
-		let ksl_count = self.main_panel.lines.len();
-		let mut rows = Vec::with_capacity(ksl_count);
+		let ksl_count = self.ksl_lines.len();
+		let mut rows  = Vec::with_capacity(ksl_count);
 
 		for ksl_idx in 0..ksl_count {
-			let span_idx = self.source_map.iter().position(|s| s.ksl_trigger_line == ksl_idx);
+			let span_idx = self
+				.source_map
+				.iter()
+				.position(|s| s.ksl_trigger_line == ksl_idx);
 
 			let (is_expanded, label) = match span_idx {
 				Some(si) => (self.expanded_spans.contains(&si), self.source_map[si].label),
-				None => (false, ""),
+				None     => (false, ""),
 			};
 
-			rows.push(DisplayRow::KslLine {
-				ksl_idx,
-				span_idx,
-				is_expanded,
-				label,
-			});
+			rows.push(DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label });
 
 			if let Some(si) = span_idx {
 				if self.expanded_spans.contains(&si) {
 					let range = self.source_map[si].source_lines.clone();
-					let last = range.end.saturating_sub(1);
+					let last  = range.end.saturating_sub(1);
 					for source_idx in range {
 						rows.push(DisplayRow::SourceLine {
 							source_idx,
@@ -652,548 +590,390 @@ impl KaisekiApp {
 
 		rows
 	}
-
-	/// Map a window-relative mouse position to the identifier token under it,
-	/// or `None` when the cursor is not over an identifier.
-	///
-	/// Uses the fixed layout constants (title bar, panel header, gutter, row
-	/// height, approximate character width) to convert pixel coordinates into a
-	/// (display-row, byte-column) pair, then delegates to the lexer.
-	fn var_at_position(&self, position: Point<Pixels>) -> Option<String> {
-		// ── Layout constants (must match the values hard-coded in render) ────
-		const TITLE_H:   f32 = 40.0; // app title bar height
-		const HEADER_H:  f32 = 28.0; // panel_header height
-		const TOP_PAD:   f32 = 8.0;  // .py(px(8.)) on the uniform_list
-		const GUTTER_W:  f32 = 56.0; // line-number gutter width
-		const ROW_H:     f32 = 22.0; // per-row height
-		const CHAR_W:    f32 = 7.8;  // approx. character width for Consolas 13px
-
-		let rel_y = position.y.to_f64() as f32 - (TITLE_H + HEADER_H + TOP_PAD);
-		let rel_x = position.x.to_f64() as f32 - GUTTER_W;
-		if rel_x < 0.0 || rel_y < 0.0 {
-			return None;
-		}
-
-		// Correct for the current scroll offset (negative = scrolled down).
-		let absolute_y = rel_y - self.main_panel.smooth.current_y;
-		let display_row_idx = (absolute_y / ROW_H) as usize;
-
-		let display_rows = self.build_display_rows();
-		let ksl_idx = match display_rows.get(display_row_idx)? {
-			DisplayRow::KslLine { ksl_idx, .. } => *ksl_idx, // ksl_idx is &usize via match ergonomics
-			_ => return None,
-		};
-
-		let line = &self.main_panel.lines[ksl_idx];
-		let byte_col = (rel_x / CHAR_W) as usize;
-
-		for token in lang::lexer::tokenize(&line.text) {
-			if token.kind == lang::lexer::TokenKind::Ident
-				&& byte_col >= token.range.start
-				&& byte_col < token.range.end
-			{
-				return Some(line.text[token.range].to_string());
-			}
-		}
-		None
-	}
 }
 
-// -- Rendering ----------------------------------------------------------------
+// ── Panel header widget ───────────────────────────────────────────────────────
 
-impl Render for KaisekiApp {
-	fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-		advance_smooth_scroll(&mut self.main_panel, window);
-
-		let display_rows = Arc::new(self.build_display_rows());
-		let row_count = display_rows.len();
-
-		let main_lines = self.main_panel.lines.clone();
-		let source_lines = self.source_panel.lines.clone();
-		let main_scroll = self.main_panel.scroll_handle.clone();
-		let main_gutter = self.main_panel.lines.len().to_string().len();
-		let source_gutter = self.source_panel.lines.len().to_string().len();
-
-		// One toggle listener per source-map span, built before the element tree.
-		// Using MouseDownEvent instead of ClickEvent — on_mouse_down is on InteractiveElement
-		// and works on plain Div without needing .id() / StatefulInteractiveElement.
-		let mut toggle_fns: Vec<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>> = Vec::new();
-		for sidx in 0..self.source_map.len() {
-			let f = cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-				if this.expanded_spans.contains(&sidx) {
-					this.expanded_spans.remove(&sidx);
-				} else {
-					this.expanded_spans.insert(sidx);
-				}
-				cx.notify();
-			});
-			toggle_fns.push(Box::new(f));
-		}
-		let toggle_fns = Arc::new(toggle_fns);
-
-		let scroll_listener = cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-			if handle_panel_scroll(&mut this.main_panel, event, window) {
-				cx.notify();
-			}
-		});
-
-		// Click listener: toggle the active variable.
-		// Clicking an Ident activates it; clicking the same Ident again clears it;
-		// clicking anything else (whitespace, operator, empty area) also clears it.
-		let click_listener = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-			if event.button != MouseButton::Left {
-				return;
-			}
-			let clicked = this.var_at_position(event.position);
-			// Toggle: if the user clicks the already-active variable, deactivate.
-			let next = if clicked.is_some() && clicked == this.active_variable {
-				None
-			} else {
-				clicked
-			};
-			if next != this.active_variable {
-				this.active_variable = next.clone();
-				this.var_occurrences = match &next {
-					Some(name) => find_var_occurrences(name, &this.main_panel.lines),
-					None => Vec::new(),
-				};
-				cx.notify();
-			}
-		});
-
-		// Capture active-variable state into Arc so the uniform_list closure (move)
-		// and the connection-gutter canvas closure can share it.
-		let var_occurrences = Arc::new(self.var_occurrences.clone());
-		let var_occs_list  = Arc::clone(&var_occurrences);
-		let scroll_y       = self.main_panel.smooth.current_y;
-		// Clone display_rows before the uniform_list closure moves it.
-		let display_rows_for_canvas = Arc::clone(&display_rows);
-		// KSL lines needed to compute per-line text-end x position for leader lines.
-		let lines_for_canvas = self.main_panel.lines.clone();
-
-		div()
-			.size_full()
-			.flex()
-			.flex_col()
-			.bg(rgb(0x1e1e2e))
-			.key_context("KaisekiApp")
-			.track_focus(&self.focus_handle)
-			// -- App title bar ------------------------------------------------
-			.child(
-				div()
-					.h(px(40.))
-					.flex()
-					.items_center()
-					.px(px(16.))
-					.bg(rgb(0x181825))
-					.text_size(px(13.))
-					.text_color(rgba(0xa6adc8ff))
-					.font_family("JetBrains Mono")
-					.child("kaiseki"),
-			)
-			// -- KSL panel with inline accordion ------------------------------
-			.child(
-				div()
-					.flex_1()
-					.flex()
-					.flex_col()
-					.overflow_hidden()
-					.child(panel_header("lifted.ksl — get_stream_fpv", "KSL", rgba(0x89b4fa55)))
-					.child(
-						div()
-						.flex_1()
-						.overflow_hidden()
-						.relative() // needed for the absolute-positioned gutter canvas
-						.on_scroll_wheel(scroll_listener)
-						.on_mouse_down(MouseButton::Left, click_listener)
-						.child(
-							uniform_list("ksl-rows", row_count, move |range, _window, _cx| {
-								range
-									.map(|i| match &display_rows[i] {
-										DisplayRow::KslLine {
-											ksl_idx,
-											span_idx,
-											is_expanded,
-											label,
-										} => {
-											let line = &main_lines[*ksl_idx];
-											let num = format!("{:>width$}", ksl_idx + 1, width = main_gutter);
-											// Merge syntax highlights with variable-hover highlights.
-											// Syntax highlights set `color`; hover highlights set
-											// `background_color` — no field-level collision.
-											let mut combined = line.highlights.clone();
-											combined.extend(hover_highlights_for_line(&var_occs_list, *ksl_idx));
-											match span_idx {
-												Some(sidx) => {
-													let sidx = *sidx;
-													let handler = Arc::clone(&toggle_fns);
-													render_accordion_row(
-														num,
-														line.text.clone(),
-														combined,
-														label,
-														*is_expanded,
-														move |e, w, cx| (handler[sidx])(e, w, cx),
-													)
-												}
-												None => {
-													render_code_row(num, line.text.clone(), combined)
-												}
-											}
-										}
-										DisplayRow::SourceLine { source_idx, is_last } => {
-											let line = &source_lines[*source_idx];
-											let num = format!("{:>width$}", source_idx + 1, width = source_gutter);
-											render_source_snippet_row(
-												num,
-												line.text.clone(),
-												line.highlights.clone(),
-												*is_last,
-											)
-										}
-									})
-									.collect::<Vec<_>>()
-							})
-							.size_full()
-							.py(px(8.))
-							.track_scroll(main_scroll),
-						)
-						// Connection-gutter canvas: leader lines from text-end, dots, rail,
-						// and arrows.  Full-width overlay so leader lines start at line-end.
-						.child(connection_gutter_canvas(
-							Arc::clone(&var_occurrences),
-							scroll_y,
-							display_rows_for_canvas,
-							lines_for_canvas,
-						)),
-					),
-			)
-	}
-}
-
-/// Render a thin sub-title bar with a language badge.
-fn panel_header(label: &str, badge: &str, badge_bg: impl Into<Hsla>) -> impl IntoElement {
-	let badge_bg: Hsla = badge_bg.into();
-	div()
-		.h(px(28.))
-		.flex()
-		.items_center()
-		.px(px(16.))
-		.bg(rgb(0x181825))
-		.border_b_1()
-		.border_color(rgb(0x313244))
-		.text_color(rgba(0x6c7086ff)) // Subtext0
-		.font_family("JetBrains Mono")
-		.text_size(px(11.))
-		.child(label.to_string())
-		.child(
-			div()
-				.ml(px(8.))
-				.px(px(5.))
-				.py(px(1.))
-				.rounded(px(3.))
-				.bg(badge_bg)
-				.text_color(rgba(0xcdd6f4ff)) // Text
-				.text_size(px(9.))
-				.font_weight(FontWeight::BOLD)
-				.child(badge.to_string()),
+fn panel_header<'a>() -> Element<'a, Message> {
+	column![
+		container(
+			row![
+				iced::widget::text("lifted.ksl — get_stream_fpv")
+					.font(Font::MONOSPACE)
+					.size(11)
+					.color(OVERLAY0),
+				container(
+					iced::widget::text("KSL")
+						.font(Font::MONOSPACE)
+						.size(9)
+						.color(TEXT_COL)
+				)
+				.padding(iced::Padding { top: 1.0, bottom: 1.0, left: 5.0, right: 5.0 })
+				.style(move |_| container::Style {
+					background: Some(Background::Color(rgba(0x89, 0xb4, 0xfa, 0x55))),
+					border: Border { radius: 3.0.into(), ..Default::default() },
+					..Default::default()
+				}),
+			]
+			.spacing(8)
+			.align_y(alignment::Vertical::Center)
 		)
-}
-
-/// A KSL code row that carries an accordion toggle button on the right.
-/// `label` is the section name; `is_expanded` controls the chevron direction.
-fn render_accordion_row(
-	num: String,
-	text: SharedString,
-	highlights: Vec<(Range<usize>, HighlightStyle)>,
-	label: &str,
-	is_expanded: bool,
-	on_toggle: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> Div {
-	let chevron = if is_expanded { "▼" } else { "▶" };
-	div()
-		.h(px(22.))
-		.flex()
-		.flex_row()
-		.items_center()
-		.font_family("Consolas")
-		.text_size(px(13.))
-		// Gutter
-		.child(
-			div()
-				.w(px(56.))
-				.h_full()
-				.flex()
-				.items_center()
-				.justify_end()
-				.pr(px(16.))
-				.text_size(px(12.))
-				.text_color(rgba(0x585b70ff))
-				.flex_shrink_0()
-				.child(num),
-		)
-		// Syntax-highlighted text
-		.child(div().flex_1().child(StyledText::new(text).with_highlights(highlights)))
-		// Toggle button — on_mouse_down works on plain Div (InteractiveElement), no .id() needed
-		.child(
-			div()
-				.flex_shrink_0()
-				.flex()
-				.items_center()
-				.gap(px(4.))
-				.px(px(8.))
-				.mr(px(8.))
-				.h(px(16.))
-				.rounded(px(3.))
-				.bg(rgba(0x31324488))
-				.text_color(rgba(0xe68945cc)) // C orange tint
-				.text_size(px(10.))
-				.font_family("JetBrains Mono")
-				.cursor_pointer()
-				.on_mouse_down(MouseButton::Left, on_toggle)
-				.child(format!("{chevron} C  {label}")),
-		)
-}
-
-/// A decompiled-C snippet row shown inside an accordion expansion.
-/// Visually distinct via a left border and slightly darker background.
-fn render_source_snippet_row(
-	num: String,
-	text: SharedString,
-	highlights: Vec<(Range<usize>, HighlightStyle)>,
-	is_last: bool,
-) -> Div {
-	div()
-		.h(px(22.))
-		.flex()
-		.flex_row()
-		.items_center()
-		.font_family("Consolas")
-		.text_size(px(13.))
-		.bg(rgba(0x181825dd))
-		.border_l(px(2.))
-		.border_color(rgba(0xe6894566)) // C orange – same family as toggle button
-		.when(is_last, |d| d.pb(px(4.)))
-		// Gutter
-		.child(
-			div()
-				.w(px(56.))
-				.h_full()
-				.flex()
-				.items_center()
-				.justify_end()
-				.pr(px(16.))
-				.text_size(px(12.))
-				.text_color(rgba(0x585b7044)) // dimmer than main gutter
-				.flex_shrink_0()
-				.child(num),
-		)
-		.child(StyledText::new(text).with_highlights(highlights))
-}
-
-// -- Connection-gutter canvas -------------------------------------------------
-
-/// Full-width transparent overlay canvas that draws the variable-occurrence
-/// connection visualisation.
-///
-/// Because the canvas spans the entire panel width, leader lines can start
-/// exactly at the end of each occurrence's line text.
-///
-/// Layout (panel-relative x, y = 0 at panel top):
-///
-///   │←── gutter 56 px ──→│←── code text ──────────→│ DOT_FROM_RIGHT │
-///   │                     │                          │                │
-///   │                     │ let local_90 = …        ├───────────────●│ def
-///   │                     │                          │               ││
-///   │                     │ local_90 = val;          ├──────────────●│ write
-///   │                     │                          │               ││
-///   │                     │ foo(local_90)            ├─────────────●─┘ read
-///
-///   leader  : 1 px horizontal line from (text_end + gap) to (dot - gap)
-///   ●       : 6×6 px rounded dot, colour-coded by role
-///   rail    : 2 px vertical bar connecting first ↔ last occurrence
-///   arrow   : small downward triangle between consecutive dots
-fn connection_gutter_canvas(
-	occurrences:  Arc<Vec<VarOccurrence>>,
-	scroll_y:     f32,
-	display_rows: Arc<Vec<DisplayRow>>,
-	lines:        Arc<Vec<HighlightedLine>>,
-) -> impl IntoElement {
-	// ── Geometry ──────────────────────────────────────────────────────────────
-	//
-	// The dot column is anchored DOT_FROM_RIGHT px from the panel's right edge.
-	// Leader lines start just after the last character of the occurrence's line
-	// and end just before the dot's left edge.
-	//
-	//   dot_x (canvas-relative) = bounds.size.width - DOT_FROM_RIGHT
-	//
-	const DOT_FROM_RIGHT: f32 = 16.0; // dot-centre distance from panel right edge
-	const LEADER_GAP:     f32 = 6.0;  // gap between text end / dot edge and leader
-
-	// Text layout constants (must mirror render / var_at_position).
-	const GUTTER_W: f32 = 56.0;
-	const CHAR_W:   f32 = 7.8; // approx. Consolas 13 px glyph advance
-
-	// Row layout (must match render).
-	const ROW_H:   f32 = 22.0;
-	const TOP_PAD: f32 = 8.0;
-
-	// Visual sizes.
-	const DOT_R:   f32 = 3.0;
-	const LINE_W:  f32 = 2.0;
-	const ARROW_W: f32 = 5.0;
-	const ARROW_H: f32 = 4.0;
-
-	canvas(
-		|_bounds, _window, _cx| (),
-		move |bounds, (), window, _cx| {
-			if occurrences.is_empty() {
-				return;
-			}
-
-			let panel_h = bounds.size.height.to_f64() as f32;
-			let panel_w = bounds.size.width.to_f64() as f32;
-
-			// Fixed dot-column x, canvas-relative.
-			let dot_x = panel_w - DOT_FROM_RIGHT;
-
-			// Build a list of (canvas-relative y, role, line_text_len) for every
-			// occurrence.  Out-of-viewport rows are kept so they participate in
-			// the spanning rail.
-			struct Entry { y: f32, role: VarRole, text_len: usize }
-
-			let entries: Vec<Entry> = occurrences
-				.iter()
-				.filter_map(|occ| {
-					let display_idx = display_rows.iter().position(|r| {
-						matches!(
-							r,
-							DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx
-						)
-					})?;
-					let y = ROW_H * display_idx as f32 + TOP_PAD + ROW_H / 2.0 + scroll_y;
-					let text_len = lines.get(occ.ksl_line_idx).map(|l| l.text.len()).unwrap_or(0);
-					Some(Entry { y, role: occ.role, text_len })
-				})
-				.collect();
-
-			if entries.is_empty() {
-				return;
-			}
-
-			let y_first = entries.first().map(|e| e.y).unwrap();
-			let y_last  = entries.last().map(|e| e.y).unwrap();
-
-			// ── Vertical spanning rail ────────────────────────────────────────
-			if y_first < y_last {
-				let ry0 = y_first.max(0.0);
-				let ry1 = y_last.min(panel_h);
-				if ry0 < ry1 {
-					window.paint_quad(fill(
-						Bounds {
-							origin: point(
-								bounds.origin.x + px(dot_x - LINE_W / 2.0),
-								bounds.origin.y + px(ry0),
-							),
-							size: size(px(LINE_W), px(ry1 - ry0)),
-						},
-						rgba(0x585b7088),
-					));
-				}
-			}
-
-			// ── Direction arrows between consecutive occurrences ──────────────
-			for pair in entries.windows(2) {
-				let y_mid = (pair[0].y + pair[1].y) / 2.0;
-				if y_mid < 0.0 || y_mid > panel_h {
-					continue;
-				}
-				let ax = bounds.origin.x + px(dot_x);
-				let ay = bounds.origin.y + px(y_mid);
-
-				let mut pb = PathBuilder::fill();
-				pb.move_to(point(ax - px(ARROW_W / 2.0), ay - px(ARROW_H / 2.0)));
-				pb.line_to(point(ax + px(ARROW_W / 2.0), ay - px(ARROW_H / 2.0)));
-				pb.line_to(point(ax,                      ay + px(ARROW_H / 2.0)));
-				pb.close();
-				if let Ok(path) = pb.build() {
-					window.paint_path(path, rgba(0x585b70cc));
-				}
-			}
-
-			// ── Leader lines + role-coloured dots ─────────────────────────────
-			for entry in &entries {
-				if entry.y < -DOT_R || entry.y > panel_h + DOT_R {
-					continue;
-				}
-
-				// Leader line: from just after text end to just before the dot.
-				let text_end_x  = GUTTER_W + entry.text_len as f32 * CHAR_W;
-				let leader_x0   = text_end_x + LEADER_GAP;
-				let leader_x1   = dot_x - DOT_R - LEADER_GAP;
-
-				if leader_x1 > leader_x0 {
-					window.paint_quad(fill(
-						Bounds {
-							origin: point(
-								bounds.origin.x + px(leader_x0),
-								bounds.origin.y + px(entry.y - 0.5),
-							),
-							size: size(px(leader_x1 - leader_x0), px(1.0)),
-						},
-						rgba(0x585b7066),
-					));
-				}
-
-				// Role dot.
-				let dot_color: Hsla = match entry.role {
-					VarRole::Definition => rgba(0xb4befeff).into(),
-					VarRole::Write      => rgba(0xf9e2afff).into(),
-					VarRole::Read       => rgba(0x94e2d5ff).into(),
-				};
-				window.paint_quad(
-					fill(
-						Bounds {
-							origin: point(
-								bounds.origin.x + px(dot_x - DOT_R),
-								bounds.origin.y + px(entry.y - DOT_R),
-							),
-							size: size(px(DOT_R * 2.0), px(DOT_R * 2.0)),
-						},
-						dot_color,
-					)
-					.corner_radii(px(DOT_R)),
-				);
-			}
-		},
-	)
-	.absolute()
-	.left(px(0.))
-	.right(px(0.))
-	.top(px(0.))
-	.h_full()
-}
-
-// -- Entry point --------------------------------------------------------------
-
-fn main() {
-	Application::new().run(|app| {
-		let options = WindowOptions {
-			titlebar: Some(TitlebarOptions {
-				title: Some("Kaiseki".into()),
+		.width(Length::Fill)
+		.height(27)
+		.align_y(alignment::Vertical::Center)
+		.padding(iced::Padding::default().left(16))
+		.style(move |_| container::Style {
+			background: Some(Background::Color(MANTLE)),
+			..Default::default()
+		}),
+		// 1 px bottom separator line
+		container(iced::widget::Space::new(Length::Fill, 1))
+			.style(move |_| container::Style {
+				background: Some(Background::Color(SURFACE0)),
 				..Default::default()
 			}),
-			..Default::default()
+	]
+	.into()
+}
+
+// ── Canvas program ────────────────────────────────────────────────────────────
+
+/// Full-panel canvas: renders all display rows and handles mouse events.
+/// Wrapped in `scrollable` — canvas height equals total content height.
+struct CodeCanvas {
+	display_rows:    Arc<Vec<DisplayRow>>,
+	ksl_lines:       Arc<Vec<HighlightedLine>>,
+	source_lines:    Arc<Vec<HighlightedLine>>,
+	var_occurrences: Arc<Vec<VarOccurrence>>,
+	source_map:      Arc<Vec<SourceSpan>>,
+	active_variable: Option<String>,
+}
+
+impl canvas::Program<Message> for CodeCanvas {
+	type State = ();
+
+	fn update(
+		&self,
+		_state: &mut (),
+		event: canvas::Event,
+		bounds: Rectangle,
+		cursor: mouse::Cursor,
+	) -> (canvas::event::Status, Option<Message>) {
+		let canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event else {
+			return (canvas::event::Status::Ignored, None);
+		};
+		let Some(pos) = cursor.position_in(bounds) else {
+			return (canvas::event::Status::Ignored, None);
 		};
 
-		app.open_window(options, |window, cx| {
-			let entity = cx.new(KaisekiApp::new);
-			// Give the root view keyboard focus so Tab events are captured.
-			let focus_handle = entity.read(cx).focus_handle.clone();
-			window.focus(&focus_handle);
-			entity
-		})
-		.expect("Failed to open window");
-		app.activate(true);
+		let row_y = pos.y - TOP_PAD;
+		if row_y < 0.0 {
+			return (canvas::event::Status::Ignored, None);
+		}
+		let row_idx = (row_y / ROW_H) as usize;
+
+		let Some(display_row) = self.display_rows.get(row_idx) else {
+			return (canvas::event::Status::Ignored, None);
+		};
+
+		match display_row {
+			DisplayRow::KslLine { ksl_idx, span_idx, .. } => {
+				// ── Accordion button click ────────────────────────────────────
+				if let Some(si) = span_idx {
+					let btn_w = accordion_btn_width(self.source_map[*si].label);
+					let btn_x = bounds.width - 8.0 - btn_w;
+					if pos.x >= btn_x {
+						return (canvas::event::Status::Captured, Some(Message::ToggleSpan(*si)));
+					}
+				}
+
+				// ── Variable identifier click ─────────────────────────────────
+				if pos.x >= GUTTER_W {
+					let char_col = ((pos.x - GUTTER_W) / CHAR_W) as usize;
+					let line     = &self.ksl_lines[*ksl_idx];
+					for token in lang::lexer::tokenize(&line.text) {
+						if token.kind == TokenKind::Ident
+							&& char_col >= token.range.start
+							&& char_col < token.range.end
+						{
+							let name = line.text[token.range].to_string();
+							let msg  = if Some(&name) == self.active_variable.as_ref() {
+								Message::SetActiveVariable(None) // toggle off on second click
+							} else {
+								Message::SetActiveVariable(Some(name))
+							};
+							return (canvas::event::Status::Captured, Some(msg));
+						}
+					}
+					// Click on whitespace / non-ident: clear selection
+					if self.active_variable.is_some() {
+						return (
+							canvas::event::Status::Captured,
+							Some(Message::SetActiveVariable(None)),
+						);
+					}
+				}
+			}
+			DisplayRow::SourceLine { .. } => {}
+		}
+
+		(canvas::event::Status::Ignored, None)
+	}
+
+	fn draw(
+		&self,
+		_state: &(),
+		renderer: &iced::Renderer,
+		_theme: &iced::Theme,
+		bounds: Rectangle,
+		_cursor: mouse::Cursor,
+	) -> Vec<canvas::Geometry> {
+		let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+		// Canvas background
+		frame.fill_rectangle(Point::ORIGIN, bounds.size(), BASE);
+
+		for (row_idx, display_row) in self.display_rows.iter().enumerate() {
+			let y = TOP_PAD + row_idx as f32 * ROW_H;
+
+			match display_row {
+				DisplayRow::KslLine { ksl_idx, span_idx, is_expanded, label } => {
+					let line = &self.ksl_lines[*ksl_idx];
+
+					// Variable occurrence background tints
+					for occ in self.var_occurrences.iter().filter(|o| o.ksl_line_idx == *ksl_idx) {
+						let x0 = GUTTER_W + occ.byte_range.start as f32 * CHAR_W;
+						let x1 = GUTTER_W + occ.byte_range.end as f32 * CHAR_W;
+						frame.fill_rectangle(
+							Point::new(x0, y),
+							Size::new(x1 - x0, ROW_H),
+							var_bg(occ.role),
+						);
+					}
+
+					draw_gutter(&mut frame, *ksl_idx + 1, y, GUTTER_FG);
+					draw_line(&mut frame, line, GUTTER_W, y + 4.5);
+
+					if span_idx.is_some() {
+						draw_accordion_btn(&mut frame, bounds.width, y, *is_expanded, label);
+					}
+				}
+
+				DisplayRow::SourceLine { source_idx, is_last } => {
+					let line   = &self.source_lines[*source_idx];
+					let row_h  = if *is_last { ROW_H + 4.0 } else { ROW_H };
+
+					frame.fill_rectangle(
+						Point::new(0.0, y),
+						Size::new(bounds.width, row_h),
+						SNIPPET_BG,
+					);
+					// Left orange border (2 px)
+					frame.fill_rectangle(
+						Point::new(0.0, y),
+						Size::new(2.0, row_h),
+						SNIPPET_BORDER,
+					);
+
+					draw_gutter(&mut frame, *source_idx + 1, y, GUTTER_DIM);
+					draw_line(&mut frame, line, GUTTER_W, y + 4.5);
+				}
+			}
+		}
+
+		// Connection gutter: rail, arrows, leader lines, dots
+		if !self.var_occurrences.is_empty() {
+			draw_connection_gutter(
+				&mut frame,
+				bounds,
+				&self.display_rows,
+				&self.ksl_lines,
+				&self.var_occurrences,
+			);
+		}
+
+		vec![frame.into_geometry()]
+	}
+
+	fn mouse_interaction(
+		&self,
+		_state: &(),
+		_bounds: Rectangle,
+		_cursor: mouse::Cursor,
+	) -> mouse::Interaction {
+		mouse::Interaction::default()
+	}
+}
+
+// ── Canvas rendering helpers ──────────────────────────────────────────────────
+
+/// Approximate pixel width of the accordion button for a given label.
+fn accordion_btn_width(label: &str) -> f32 {
+	// "▶ C  " is 5 visible characters; add the label length + 16 px horizontal padding.
+	(5 + label.len()) as f32 * CHAR_W + 16.0
+}
+
+/// Render a right-aligned line number into the gutter column.
+fn draw_gutter(frame: &mut canvas::Frame, num: usize, y: f32, color: Color) {
+	let s      = num.to_string();
+	let text_w = s.len() as f32 * CHAR_W;
+	let x      = GUTTER_W - 16.0 - text_w;
+	draw_text(frame, &s, x, y + 4.5, color);
+}
+
+/// Render a syntax-highlighted line starting at `x_start`.
+/// Fills gaps between highlight spans with the default text colour.
+fn draw_line(frame: &mut canvas::Frame, line: &HighlightedLine, x_start: f32, y: f32) {
+	let text   = &line.text;
+	let mut cursor = 0usize;
+
+	for (range, color) in &line.highlights {
+		if cursor < range.start {
+			let seg = &text[cursor..range.start];
+			if !seg.is_empty() {
+				draw_text(frame, seg, x_start + cursor as f32 * CHAR_W, y, TEXT_COL);
+			}
+		}
+		let seg = &text[range.clone()];
+		if !seg.is_empty() {
+			draw_text(frame, seg, x_start + range.start as f32 * CHAR_W, y, *color);
+		}
+		cursor = range.end;
+	}
+
+	if cursor < text.len() {
+		let seg = &text[cursor..];
+		if !seg.is_empty() {
+			draw_text(frame, seg, x_start + cursor as f32 * CHAR_W, y, TEXT_COL);
+		}
+	}
+}
+
+/// Draw the accordion ▶/▼ toggle badge on the right side of a KSL row.
+fn draw_accordion_btn(
+	frame:       &mut canvas::Frame,
+	canvas_w:    f32,
+	y:           f32,
+	is_expanded: bool,
+	label:       &str,
+) {
+	let chevron  = if is_expanded { "▼" } else { "▶" };
+	let btn_text = format!("{chevron} C  {label}");
+	let btn_w    = accordion_btn_width(label);
+	let btn_x    = canvas_w - 8.0 - btn_w;
+	let btn_y    = y + 3.0;
+
+	frame.fill_rectangle(Point::new(btn_x, btn_y), Size::new(btn_w, 16.0), ACCORDION_BG);
+	draw_text(frame, &btn_text, btn_x + 8.0, btn_y + 2.0, ACCORDION_FG);
+}
+
+/// Low-level text draw: monospace, FONT_SIZE, top-left origin at (x, y).
+fn draw_text(frame: &mut canvas::Frame, content: &str, x: f32, y: f32, color: Color) {
+	frame.fill_text(canvas::Text {
+		content: content.to_string(),
+		position: Point::new(x, y),
+		color,
+		size: Pixels(FONT_SIZE),
+		font: Font::MONOSPACE,
+		horizontal_alignment: alignment::Horizontal::Left,
+		vertical_alignment: alignment::Vertical::Top,
+		..canvas::Text::default()
 	});
+}
+
+// ── Connection gutter ─────────────────────────────────────────────────────────
+//
+// Renders the variable-occurrence visualisation directly in the code canvas.
+// Because the canvas scrolls with the content, dots sit exactly at the y
+// position of the rows they annotate — no scroll-offset correction needed.
+//
+//   │←── gutter 56px ──→│←── code ──────────→│ DOT_FROM_RIGHT │
+//   │                    │                    │                │
+//   │                    │ let local_90 = …   ├────────────────● def (lavender)
+//   │                    │                    │                │
+//   │                    │ local_90 = val;    ├───────────────●  write (yellow)
+//   │                    │                    │                │
+//   │                    │ foo(local_90)       ├──────────────●─┘ read (teal)
+
+fn draw_connection_gutter(
+	frame:        &mut canvas::Frame,
+	bounds:       Rectangle,
+	display_rows: &[DisplayRow],
+	lines:        &[HighlightedLine],
+	occurrences:  &[VarOccurrence],
+) {
+	let dot_x = bounds.width - DOT_FROM_RIGHT;
+
+	struct Entry { y: f32, role: VarRole, text_len: usize }
+
+	let entries: Vec<Entry> = occurrences
+		.iter()
+		.filter_map(|occ| {
+			// Find the display-list index of the KSL row that holds this occurrence.
+			let display_idx = display_rows.iter().position(|r| {
+				matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == occ.ksl_line_idx)
+			})?;
+			let y        = TOP_PAD + display_idx as f32 * ROW_H + ROW_H / 2.0;
+			let text_len = lines.get(occ.ksl_line_idx).map(|l| l.text.len()).unwrap_or(0);
+			Some(Entry { y, role: occ.role, text_len })
+		})
+		.collect();
+
+	if entries.is_empty() {
+		return;
+	}
+
+	let y_first = entries.first().unwrap().y;
+	let y_last  = entries.last().unwrap().y;
+
+	// ── Vertical spanning rail ────────────────────────────────────────────────
+	if y_first < y_last {
+		frame.fill_rectangle(
+			Point::new(dot_x - RAIL_W / 2.0, y_first),
+			Size::new(RAIL_W, y_last - y_first),
+			RAIL_COL,
+		);
+	}
+
+	// ── Direction arrows between consecutive occurrences ──────────────────────
+	for pair in entries.windows(2) {
+		let y_mid = (pair[0].y + pair[1].y) / 2.0;
+		let mut path = canvas::path::Builder::new();
+		path.move_to(Point::new(dot_x - ARROW_W / 2.0, y_mid - ARROW_H / 2.0));
+		path.line_to(Point::new(dot_x + ARROW_W / 2.0, y_mid - ARROW_H / 2.0));
+		path.line_to(Point::new(dot_x, y_mid + ARROW_H / 2.0));
+		path.close();
+		frame.fill(&path.build(), ARROW_COL);
+	}
+
+	// ── Leader lines + role-coloured dots ─────────────────────────────────────
+	for entry in &entries {
+		let text_end_x = GUTTER_W + entry.text_len as f32 * CHAR_W;
+		let lx0        = text_end_x + LEADER_GAP;
+		let lx1        = dot_x - DOT_R - LEADER_GAP;
+		if lx1 > lx0 {
+			frame.fill_rectangle(
+				Point::new(lx0, entry.y - 0.5),
+				Size::new(lx1 - lx0, 1.0),
+				LEADER_COL,
+			);
+		}
+
+		// Role-coloured circle dot
+		let mut path = canvas::path::Builder::new();
+		path.circle(Point::new(dot_x, entry.y), DOT_R);
+		frame.fill(&path.build(), var_dot(entry.role));
+	}
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+fn main() -> iced::Result {
+	iced::application("kaiseki", KaisekiState::update, KaisekiState::view)
+		.window(iced::window::Settings {
+			size:     iced::Size::new(1400.0, 900.0),
+			min_size: Some(iced::Size::new(800.0, 600.0)),
+			..Default::default()
+		})
+		.run_with(KaisekiState::new)
 }
