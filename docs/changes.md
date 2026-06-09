@@ -1,5 +1,52 @@
 # Changes
 
+## refactor: モジュール分割
+
+1451行の `src/main.rs` を責務別に8モジュールへ分割した。
+
+| ファイル | 内容 |
+| --- | --- |
+| `src/main.rs` | エントリーポイント (`main()`) のみ |
+| `src/theme.rs` | カラーパレット定数・レイアウト定数・`var_bg`/`var_dot` |
+| `src/types.rs` | `HighlightedLine`, `VarRole`, `VarOccurrence`, `DisplayRow`, `KvlEntry` |
+| `src/message.rs` | `Message` enum |
+| `src/file_tree.rs` | `scan_kvp`, `extract_kvl_view`, `collect_dir_paths` |
+| `src/highlight.rs` | `build_ksl_lines`, `build_source_lines`, `token_color` |
+| `src/analysis.rs` | `find_var_occurrences`, `find_fn_definition`, `is_type_position`, `is_fn_call` |
+| `src/canvas.rs` | `CodeCanvas` + `canvas::Program` impl + `draw_*` ヘルパー群 |
+| `src/app.rs` | `KaisekiState` + impl, `panel_header`, `render_kvl_tree`, `SAMPLE_CODE` |
+
+## feat: サイドバー・kvpファイルツリー・kvlファイル読み込み
+
+.kvp ディレクトリ（サンプルコードのパッケージ形式）をサイドバーのファイルツリーとして表示し、
+.kvl ファイルをクリックするとコードパネルに読み込めるようにした。
+
+### サイドバー
+
+- `SIDEBAR_W = 220.0` 定数追加
+- `KvlEntry` enum: `.kvp` 内のファイル/ディレクトリ構造を表す
+- `scan_kvp(dir)`: ディレクトリを再帰スキャンして `KvlEntry` ツリーを構築
+- `render_kvl_tree(...)`: ツリーをサイドバー行ウィジェット列に変換（インデント・選択状態対応）
+- `collect_dir_paths(...)`: 初期展開状態のためディレクトリパスを収集
+
+### kvlファイル形式
+
+- `extract_kvl_view(content)`: `--- view ---` セクション以降のKSLテキストを抽出
+
+### アプリ状態 (`KaisekiState`)
+
+- `kvl_tree`, `selected_kvl`, `selected_name`, `expanded_dirs`, `sidebar_visible` フィールドを追加
+- `Message::SelectKvl`, `ToggleDir`, `ToggleSidebar`, `JumpToDefinition` を追加
+- `view()`: タイトルバー（サイドバートグルボタン付き）＋サイドバー＋コードパネルの3カラムレイアウトに変更
+- `view_sidebar()`: サイドバーウィジェットの実装
+- `view_code_panel()`: コードパネルをメソッドとして分離
+- `jump_to_definition()`: `fn <name>` 定義行へスクロール
+- CLIまたはデフォルトの `./examples/after-effects.kvp` から .kvp パスを読み込むよう `main()` を変更
+
+### パネルヘッダー
+
+- `panel_header(file_name)`: 表示中のファイル名を引数で受け取るよう変更
+
 ## feat: スコープ解析によるハイライト範囲の絞り込み
 
 ### 概要
