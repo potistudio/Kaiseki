@@ -1,10 +1,16 @@
 mod lang;
 
-use std::{collections::HashSet, ops::Range, sync::Arc};
+use std::{
+	collections::HashSet,
+	ops::Range,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use iced::{
-	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Task, alignment, mouse,
-	widget::{canvas, column, container, row, scrollable},
+	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Task,
+	alignment, mouse,
+	widget::{button, canvas, column, container, row, scrollable},
 };
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings};
 
@@ -228,6 +234,9 @@ const CODE_X: f32 = CONN_GUTTER_W + GUTTER_W; // where code text starts
 const DOT_R: f32 = 3.5;
 const RAIL_W: f32 = 2.0;
 
+// Sidebar width
+const SIDEBAR_W: f32 = 220.0;
+
 // ── Color palette (Catppuccin Mocha) ─────────────────────────────────────────
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -331,6 +340,152 @@ enum DisplayRow {
 		source_idx: usize,
 		is_last: bool,
 	},
+}
+
+/// Entry in the .kvp file tree shown in the sidebar.
+enum KvlEntry {
+	File {
+		/// Stem of the .kvl filename (without extension), used as the label.
+		display_name: String,
+		path:         PathBuf,
+	},
+	/// Sub-directory inside the .kvp package.
+	Dir {
+		name:     String,
+		path:     PathBuf,
+		children: Vec<KvlEntry>,
+	},
+}
+
+// ── File loading ──────────────────────────────────────────────────────────────
+
+/// Recursively scan a .kvp directory and return a KvlEntry tree.
+fn scan_kvp(dir: &Path) -> Vec<KvlEntry> {
+	let Ok(read_dir) = std::fs::read_dir(dir) else { return Vec::new() };
+	let mut raw: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+	raw.sort_by_key(|e| e.file_name());
+	raw.into_iter()
+		.filter_map(|entry| {
+			let path = entry.path();
+			let file_name = entry.file_name().to_string_lossy().to_string();
+			if path.is_dir() {
+				let children = scan_kvp(&path);
+				// Omit empty directories.
+				(!children.is_empty()).then_some(KvlEntry::Dir { name: file_name, path: path.clone(), children })
+			} else if path.extension().map_or(false, |ext| ext == "kvl") {
+				let display_name = path
+					.file_stem()
+					.map(|s| s.to_string_lossy().to_string())
+					.unwrap_or(file_name);
+				Some(KvlEntry::File { display_name, path })
+			} else {
+				None
+			}
+		})
+		.collect()
+}
+
+/// Extract the KSL text from the "--- view ---" section of a .kvl file.
+///
+/// .kvl format:
+///   --- source ---
+///   <decompiled C>
+///   --- view ---
+///   <KSL>
+fn extract_kvl_view(content: &str) -> &str {
+	const MARKER: &str = "--- view ---";
+	content
+		.find(MARKER)
+		.map(|pos| content[pos + MARKER.len()..].trim_start_matches('\n'))
+		.unwrap_or(content)
+}
+
+// ── Sidebar widget ────────────────────────────────────────────────────────────
+
+/// Flatten a KvlEntry tree into a list of sidebar row widgets (recursive).
+/// `expanded_dirs` controls which Dir entries are open.
+fn render_kvl_tree<'a>(
+	entries: &'a [KvlEntry],
+	selected: &'a Option<PathBuf>,
+	expanded_dirs: &'a HashSet<PathBuf>,
+	indent: usize,
+) -> Vec<Element<'a, Message>> {
+	let mut elements: Vec<Element<'a, Message>> = Vec::new();
+	let left_pad = 12.0 + indent as f32 * 14.0;
+
+	for entry in entries {
+		match entry {
+			KvlEntry::File { display_name, path } => {
+				let is_selected = selected.as_deref() == Some(path.as_path());
+				let file_path = path.clone();
+				elements.push(
+					button(
+						iced::widget::text(display_name.as_str())
+							.font(Font::MONOSPACE)
+							.size(11),
+					)
+					.style(move |_, _| button::Style {
+						background: Some(Background::Color(
+							if is_selected { SURFACE0 } else { Color::TRANSPARENT },
+						)),
+						text_color: if is_selected { TEXT_COL } else { SUBTEXT0 },
+						border: Border::default(),
+						..Default::default()
+					})
+					.on_press(Message::SelectKvl(file_path))
+					.width(Length::Fill)
+					.padding(iced::Padding {
+						top: 4.0,
+						bottom: 4.0,
+						left: left_pad,
+						right: 8.0,
+					})
+					.into(),
+				);
+			}
+			KvlEntry::Dir { name, path, children } => {
+				let is_expanded = expanded_dirs.contains(path);
+				let dir_path = path.clone();
+				let chevron = if is_expanded { "▾" } else { "▸" };
+				elements.push(
+					button(
+						iced::widget::text(format!("{chevron} {name}"))
+							.font(Font::MONOSPACE)
+							.size(10),
+					)
+					.style(move |_, _| button::Style {
+						background: Some(Background::Color(Color::TRANSPARENT)),
+						text_color: OVERLAY0,
+						border: Border::default(),
+						..Default::default()
+					})
+					.on_press(Message::ToggleDir(dir_path))
+					.width(Length::Fill)
+					.padding(iced::Padding {
+						top: 6.0,
+						bottom: 2.0,
+						left: left_pad,
+						right: 8.0,
+					})
+					.into(),
+				);
+				if is_expanded {
+					elements.extend(render_kvl_tree(children, selected, expanded_dirs, indent + 1));
+				}
+			}
+		}
+	}
+	elements
+}
+
+/// Collect all Dir paths in a KvlEntry tree (for default-expanded initialization).
+fn collect_dir_paths(entries: &[KvlEntry], out: &mut HashSet<PathBuf>) {
+	for entry in entries {
+		if let KvlEntry::Dir { path, children, .. } = entry {
+			out.insert(path.clone());
+			collect_dir_paths(children, out);
+		}
+	}
 }
 
 // ── KSL syntax highlighting ───────────────────────────────────────────────────
@@ -521,6 +676,44 @@ fn find_var_occurrences(name: &str, lines: &[HighlightedLine]) -> Vec<VarOccurre
 	result
 }
 
+// ── Variable analysis ── helper: function-call / definition detection ─────────
+
+/// Returns the KSL line index of the `fn <name>` definition, or `None`.
+fn find_fn_definition(name: &str, lines: &[HighlightedLine]) -> Option<usize> {
+	for (line_idx, line) in lines.iter().enumerate() {
+		let tokens = lang::lexer::tokenize(&line.text);
+		for (tok_pos, token) in tokens.iter().enumerate() {
+			if token.kind != TokenKind::Ident || &line.text[token.range.clone()] != name {
+				continue;
+			}
+			// Preceded by the `fn` keyword → this is the definition site.
+			let prev = tokens[..tok_pos]
+				.iter()
+				.rev()
+				.find(|t| t.kind != TokenKind::Whitespace);
+			if matches!(prev, Some(t) if t.kind == TokenKind::Keyword && &line.text[t.range.clone()] == "fn") {
+				return Some(line_idx);
+			}
+		}
+	}
+	None
+}
+
+/// Returns `true` when the identifier at `tok_pos` is immediately followed by `(`,
+/// meaning it is the callee of a call expression.
+fn is_fn_call(tokens: &[lang::lexer::Token], tok_pos: usize, line: &str) -> bool {
+	tokens[tok_pos + 1..]
+		.iter()
+		.find(|t| t.kind != TokenKind::Whitespace)
+		.map(|t| t.kind == TokenKind::Punct && &line[t.range.clone()] == "(")
+		.unwrap_or(false)
+}
+
+/// Stable scrollable ID for the code panel.  Must match the `.id()` call in `view_code_panel`.
+fn code_scrollable_id() -> scrollable::Id {
+	scrollable::Id::new("kaiseki-code")
+}
+
 // ── Application state ─────────────────────────────────────────────────────────
 
 struct KaisekiState {
@@ -532,6 +725,14 @@ struct KaisekiState {
 	var_occurrences: Arc<Vec<VarOccurrence>>,
 	// Pre-computed brace depths for scope-aware occurrence filtering.
 	depth_map:       lang::scope::DepthMap,
+	// ── File tree (populated when a .kvp directory is supplied) ──────────────
+	kvl_tree:        Vec<KvlEntry>,
+	selected_kvl:    Option<PathBuf>,
+	/// Display name shown in the panel header (file stem, or "sample").
+	selected_name:   String,
+	/// Directories currently expanded in the sidebar tree.
+	expanded_dirs:   HashSet<PathBuf>,
+	sidebar_visible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -541,10 +742,19 @@ enum Message {
 	/// The line index is needed to resolve which declaration scope to use when
 	/// the same name is bound multiple times (e.g. shadowing across if/else branches).
 	SetActiveVariable(Option<(String, usize)>),
+	/// Double-click on a function-call identifier: scroll the view to its `fn` definition.
+	JumpToDefinition(String),
+	/// User clicked a .kvl entry in the sidebar.
+	SelectKvl(PathBuf),
+	/// User clicked a directory header in the sidebar.
+	ToggleDir(PathBuf),
+	ToggleSidebar,
 }
 
 impl KaisekiState {
-	fn new() -> (Self, Task<Message>) {
+	fn new(kvp_path: Option<PathBuf>) -> (Self, Task<Message>) {
+		let kvl_tree = kvp_path.as_deref().map(scan_kvp).unwrap_or_default();
+
 		let ksl_lines = build_ksl_lines(SAMPLE_KSL);
 		let depth_map = {
 			let raw: Vec<&str> = ksl_lines.iter().map(|l| l.text.as_str()).collect();
@@ -567,6 +777,15 @@ impl KaisekiState {
 			active_variable: None,
 			var_occurrences: Arc::new(Vec::new()),
 			depth_map,
+			selected_kvl:  None,
+			selected_name: "sample".to_string(),
+			expanded_dirs: {
+				let mut dirs = HashSet::new();
+				collect_dir_paths(&kvl_tree, &mut dirs);
+				dirs
+			},
+			kvl_tree,
+			sidebar_visible: true,
 		};
 		(state, Task::none())
 	}
@@ -577,6 +796,9 @@ impl KaisekiState {
 				if !self.expanded_spans.remove(&idx) {
 					self.expanded_spans.insert(idx);
 				}
+			}
+			Message::JumpToDefinition(name) => {
+				return self.jump_to_definition(&name);
 			}
 			Message::SetActiveVariable(val) => {
 				let (new_occurrences, new_active) = match val {
@@ -599,11 +821,155 @@ impl KaisekiState {
 				self.var_occurrences = Arc::new(new_occurrences);
 				self.active_variable = new_active;
 			}
+			Message::ToggleDir(path) => {
+				if !self.expanded_dirs.remove(&path) {
+					self.expanded_dirs.insert(path);
+				}
+			}
+			Message::ToggleSidebar => {
+				self.sidebar_visible = !self.sidebar_visible;
+			}
+			Message::SelectKvl(path) => {
+				let content = std::fs::read_to_string(&path).unwrap_or_default();
+				let ksl_lines = build_ksl_lines(extract_kvl_view(&content));
+				let depth_map = {
+					let raw: Vec<&str> = ksl_lines.iter().map(|l| l.text.as_str()).collect();
+					lang::scope::DepthMap::build(&raw)
+				};
+				let display_name = path
+					.file_stem()
+					.map(|s| s.to_string_lossy().to_string())
+					.unwrap_or_else(|| "unknown".to_string());
+
+				self.ksl_lines       = Arc::new(ksl_lines);
+				// .kvl files do not carry a C source block yet — clear the accordion.
+				self.source_lines    = Arc::new(Vec::new());
+				self.source_map      = Arc::new(Vec::new());
+				self.expanded_spans  .clear();
+				self.active_variable = None;
+				self.var_occurrences = Arc::new(Vec::new());
+				self.depth_map       = depth_map;
+				self.selected_kvl    = Some(path);
+				self.selected_name   = display_name;
+			}
 		}
 		Task::none()
 	}
 
+	fn jump_to_definition(&self, name: &str) -> Task<Message> {
+		let Some(ksl_line_idx) = find_fn_definition(name, &self.ksl_lines) else {
+			return Task::none();
+		};
+		let display_rows = self.build_display_rows();
+		let Some(display_idx) = display_rows.iter().position(|r| {
+			matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == ksl_line_idx)
+		}) else {
+			return Task::none();
+		};
+		// Place the target line a few rows from the top for comfortable reading.
+		let y = TOP_PAD + display_idx as f32 * ROW_H;
+		let scroll_y = (y - ROW_H * 3.0).max(0.0);
+		scrollable::scroll_to(code_scrollable_id(), scrollable::AbsoluteOffset { x: 0.0, y: scroll_y })
+	}
+
 	fn view(&self) -> Element<'_, Message> {
+		// 1 px vertical separator between sidebar (or collapsed strip) and code panel.
+		let make_separator = || {
+			container(iced::widget::Space::new(Length::Fixed(1.0), Length::Fill))
+				.height(Length::Fill)
+				.style(move |_| container::Style {
+					background: Some(Background::Color(SURFACE0)),
+					..Default::default()
+				})
+		};
+
+		if self.sidebar_visible {
+			row![self.view_sidebar(), make_separator(), self.view_code_panel()]
+				.width(Length::Fill)
+				.height(Length::Fill)
+				.into()
+		} else {
+			// Collapsed sidebar: narrow MANTLE strip with a › button at the top.
+			let expand_btn = button(
+				iced::widget::text("›").font(Font::MONOSPACE).size(14),
+			)
+			.style(|_, _| button::Style {
+				background: Some(Background::Color(Color::TRANSPARENT)),
+				text_color: SUBTEXT0,
+				border: Border::default(),
+				..Default::default()
+			})
+			.on_press(Message::ToggleSidebar)
+			.padding(iced::Padding { top: 6.0, bottom: 6.0, left: 8.0, right: 8.0 });
+
+			let collapsed_strip = container(
+				column![expand_btn].width(Length::Fill),
+			)
+			.width(Length::Fixed(28.0))
+			.height(Length::Fill)
+			.style(move |_| container::Style {
+				background: Some(Background::Color(MANTLE)),
+				..Default::default()
+			});
+
+			row![collapsed_strip, make_separator(), self.view_code_panel()]
+				.width(Length::Fill)
+				.height(Length::Fill)
+				.into()
+		}
+	}
+
+	fn view_sidebar(&self) -> Element<'_, Message> {
+		let mut items: Vec<Element<'_, Message>> = Vec::new();
+
+		// Sidebar section header: ‹ toggle on the left, "files" label next to it.
+		items.push(
+			container(
+				row![
+					button(
+						iced::widget::text("‹").font(Font::MONOSPACE).size(12),
+					)
+					.style(|_, _| button::Style {
+						background: Some(Background::Color(Color::TRANSPARENT)),
+						text_color: SUBTEXT0,
+						border: Border::default(),
+						..Default::default()
+					})
+					.on_press(Message::ToggleSidebar)
+					.padding(iced::Padding { top: 0.0, bottom: 0.0, left: 0.0, right: 8.0 }),
+					iced::widget::text("files")
+						.font(Font::MONOSPACE)
+						.size(10)
+						.color(OVERLAY0),
+				]
+				.align_y(alignment::Vertical::Center),
+			)
+			.width(Length::Fill)
+			.height(28)
+			.align_y(alignment::Vertical::Center)
+			.padding(iced::Padding::default().left(12))
+			.style(move |_| container::Style {
+				background: Some(Background::Color(SURFACE0)),
+				..Default::default()
+			})
+			.into(),
+		);
+
+		items.extend(render_kvl_tree(&self.kvl_tree, &self.selected_kvl, &self.expanded_dirs, 0));
+
+		container(
+			scrollable(column(items).width(Length::Fill)).height(Length::Fill),
+		)
+		.width(Length::Fixed(SIDEBAR_W))
+		.height(Length::Fill)
+		.style(move |_| container::Style {
+			background: Some(Background::Color(MANTLE)),
+			..Default::default()
+		})
+		.into()
+	}
+
+	fn view_code_panel(&self) -> Element<'_, Message> {
 		let display_rows = Arc::new(self.build_display_rows());
 		let canvas_height = display_rows.len() as f32 * ROW_H + TOP_PAD * 2.0;
 
@@ -617,32 +983,13 @@ impl KaisekiState {
 		};
 
 		column![
-			// ── App title bar ────────────────────────────────────────────────
-			container(
-				iced::widget::text("kaiseki")
-					.font(Font::MONOSPACE)
-					.size(13)
-					.color(SUBTEXT0)
-			)
-			.width(Length::Fill)
-			.height(40)
-			.align_y(alignment::Vertical::Center)
-			.padding(iced::Padding::default().left(16))
-			.style(move |_| container::Style {
-				background: Some(Background::Color(MANTLE)),
-				..Default::default()
-			}),
-			// ── Panel header with language badge ─────────────────────────────
-			panel_header(),
-			// ── Scrollable code canvas ───────────────────────────────────────
-			// The canvas is given a fixed height equal to the full content height.
-			// iced's scrollable widget handles viewport clipping; the canvas renders
-			// all rows and the dots scroll with the lines they annotate.
+			panel_header(self.selected_name.clone()),
 			scrollable(
 				canvas(code_canvas)
 					.width(Length::Fill)
-					.height(Length::Fixed(canvas_height))
+					.height(Length::Fixed(canvas_height)),
 			)
+			.id(code_scrollable_id())
 			.width(Length::Fill)
 			.height(Length::Fill),
 		]
@@ -691,11 +1038,12 @@ impl KaisekiState {
 
 // ── Panel header widget ───────────────────────────────────────────────────────
 
-fn panel_header<'a>() -> Element<'a, Message> {
+fn panel_header<'a>(file_name: impl Into<String>) -> Element<'a, Message> {
+	let title = file_name.into();
 	column![
 		container(
 			row![
-				iced::widget::text("lifted.ksl — get_stream_fpv")
+				iced::widget::text(title)
 					.font(Font::MONOSPACE)
 					.size(11)
 					.color(OVERLAY0),
@@ -1083,11 +1431,21 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> iced::Result {
+	// .kvp path: CLI arg > dev default > None (sample mode).
+	let kvp_path: Option<PathBuf> = std::env::args()
+		.nth(1)
+		.map(Into::into)
+		.or_else(|| {
+			// During development, fall back to the bundled example project.
+			let default = PathBuf::from("./examples/after-effects.kvp");
+			default.exists().then_some(default)
+		});
+
 	iced::application("kaiseki", KaisekiState::update, KaisekiState::view)
 		.window(iced::window::Settings {
 			size: iced::Size::new(1400.0, 900.0),
 			min_size: Some(iced::Size::new(800.0, 600.0)),
 			..Default::default()
 		})
-		.run_with(KaisekiState::new)
+		.run_with(move || KaisekiState::new(kvp_path.clone()))
 }
