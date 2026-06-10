@@ -11,22 +11,22 @@
 // opening value mid-line, which marks the old scope's boundary even though
 // depth_start for the next line equals the opening depth again.
 
+use super::lexer::{TokenKind, tokenize};
 use std::ops::Range;
-use super::lexer::{tokenize, TokenKind};
 
 // ── Depth map ─────────────────────────────────────────────────────────────────
 
 pub struct DepthMap {
 	depth_start: Vec<i32>,
-	depth_min:   Vec<i32>,
-	num_lines:   usize,
+	depth_min: Vec<i32>,
+	num_lines: usize,
 }
 
 impl DepthMap {
 	/// Build from a slice of raw source lines (no trailing newlines).
 	pub fn build(lines: &[&str]) -> Self {
 		let mut depth_start = Vec::with_capacity(lines.len());
-		let mut depth_min   = Vec::with_capacity(lines.len());
+		let mut depth_min = Vec::with_capacity(lines.len());
 		let mut current: i32 = 0;
 
 		for line in lines {
@@ -54,7 +54,11 @@ impl DepthMap {
 			depth_min.push(min);
 		}
 
-		DepthMap { depth_start, depth_min, num_lines: lines.len() }
+		DepthMap {
+			depth_start,
+			depth_min,
+			num_lines: lines.len(),
+		}
 	}
 
 	pub fn depth_at(&self, line_idx: usize) -> i32 {
@@ -77,7 +81,7 @@ impl DepthMap {
 // ── Declaration detection ─────────────────────────────────────────────────────
 
 struct DeclSite {
-	line:  usize,
+	line: usize,
 	depth: i32,
 }
 
@@ -111,12 +115,14 @@ fn find_decl_sites(name: &str, lines: &[&str], depth_map: &DepthMap) -> Vec<Decl
 				.find(|t| t.kind != TokenKind::Whitespace)
 				.map(|t| (t.kind, &line[t.range.clone()]));
 
-			let is_decl =
-				matches!(&prev, Some((TokenKind::Keyword, kw)) if matches!(*kw, "let" | "var" | "fn"))
+			let is_decl = matches!(&prev, Some((TokenKind::Keyword, kw)) if matches!(*kw, "let" | "var" | "fn"))
 				|| matches!(&next, Some((TokenKind::Punct, p)) if *p == ":");
 
 			if is_decl {
-				result.push(DeclSite { line: line_idx, depth: depth_map.depth_at(line_idx) });
+				result.push(DeclSite {
+					line: line_idx,
+					depth: depth_map.depth_at(line_idx),
+				});
 			}
 		}
 	}
@@ -135,18 +141,15 @@ fn find_decl_sites(name: &str, lines: &[&str], depth_map: &DepthMap) -> Vec<Decl
 ///
 /// Returns `None` when no covering declaration exists — caller should show
 /// all occurrences (file-global or undeclared name).
-pub fn visible_scope(
-	name:      &str,
-	at_line:   usize,
-	lines:     &[&str],
-	depth_map: &DepthMap,
-) -> Option<Range<usize>> {
+pub fn visible_scope(name: &str, at_line: usize, lines: &[&str], depth_map: &DepthMap) -> Option<Range<usize>> {
 	let decl_sites = find_decl_sites(name, lines, depth_map);
 
 	let covering = decl_sites
 		.iter()
 		.filter(|d| {
-			if d.line > at_line { return false; }
+			if d.line > at_line {
+				return false;
+			}
 			let end = depth_map.scope_end(d.line, d.depth);
 			at_line < end
 		})

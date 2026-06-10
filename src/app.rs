@@ -1,12 +1,8 @@
-use std::{
-	collections::HashSet,
-	path::PathBuf,
-	sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use iced::{
-	Background, Border, Color, Element, Font, Length, Task,
-	alignment, widget::{button, canvas, column, container, row, scrollable},
+	Background, Border, Color, Element, Font, Length, Task, alignment,
+	widget::{button, canvas, column, container, row, scrollable},
 };
 
 use crate::analysis::{find_fn_definition, find_var_occurrences};
@@ -15,10 +11,7 @@ use crate::file_tree::{collect_dir_paths, extract_kvl_view, scan_kvp};
 use crate::highlight::{build_ksl_lines, build_source_lines};
 use crate::lang::{SAMPLE_KSL, SAMPLE_SOURCE_MAP, SourceSpan};
 use crate::message::Message;
-use crate::theme::{
-	MANTLE, OVERLAY0, SIDEBAR_W, SUBTEXT0, SURFACE0, TEXT_COL, TOP_PAD, ROW_H,
-	rgba,
-};
+use crate::theme::{MANTLE, OVERLAY0, ROW_H, SIDEBAR_W, SUBTEXT0, SURFACE0, TEXT_COL, TOP_PAD, rgba};
 use crate::types::{DisplayRow, HighlightedLine, KvlEntry, VarOccurrence};
 
 // ── Sample decompiled-C source (Ghidra output for NIM_GetStreamFPV) ───────────
@@ -221,21 +214,21 @@ LAB_180e2b65e:
 // ── Application state ─────────────────────────────────────────────────────────
 
 pub struct KaisekiState {
-	ksl_lines:       Arc<Vec<HighlightedLine>>,
-	source_lines:    Arc<Vec<HighlightedLine>>,
-	source_map:      Arc<Vec<SourceSpan>>,
-	expanded_spans:  HashSet<usize>,
+	ksl_lines: Arc<Vec<HighlightedLine>>,
+	source_lines: Arc<Vec<HighlightedLine>>,
+	source_map: Arc<Vec<SourceSpan>>,
+	expanded_spans: HashSet<usize>,
 	active_variable: Option<String>,
 	var_occurrences: Arc<Vec<VarOccurrence>>,
 	// Pre-computed brace depths for scope-aware occurrence filtering.
-	depth_map:       crate::lang::scope::DepthMap,
+	depth_map: crate::lang::scope::DepthMap,
 	// ── File tree (populated when a .kvp directory is supplied) ──────────────
-	kvl_tree:        Vec<KvlEntry>,
-	selected_kvl:    Option<PathBuf>,
+	kvl_tree: Vec<KvlEntry>,
+	selected_kvl: Option<PathBuf>,
 	/// Display name shown in the panel header (file stem, or "sample").
-	selected_name:   String,
+	selected_name: String,
 	/// Directories currently expanded in the sidebar tree.
-	expanded_dirs:   HashSet<PathBuf>,
+	expanded_dirs: HashSet<PathBuf>,
 	sidebar_visible: bool,
 }
 
@@ -261,11 +254,11 @@ impl KaisekiState {
 					})
 					.collect(),
 			),
-			expanded_spans:  HashSet::new(),
+			expanded_spans: HashSet::new(),
 			active_variable: None,
 			var_occurrences: Arc::new(Vec::new()),
 			depth_map,
-			selected_kvl:  None,
+			selected_kvl: None,
 			selected_name: "sample".to_string(),
 			expanded_dirs: {
 				let mut dirs = HashSet::new();
@@ -293,16 +286,15 @@ impl KaisekiState {
 					None => (Vec::new(), None),
 					Some((name, clicked_line)) => {
 						let all_occurrences = find_var_occurrences(&name, &self.ksl_lines);
-						let raw: Vec<&str> = self.ksl_lines.iter()
-							.map(|l| l.text.as_str()).collect();
-						let scoped_occurrences = match crate::lang::scope::visible_scope(
-							&name, clicked_line, &raw, &self.depth_map,
-						) {
-							Some(range) => all_occurrences.into_iter()
-								.filter(|occurrence| range.contains(&occurrence.ksl_line_idx))
-								.collect(),
-							None => all_occurrences,
-						};
+						let raw: Vec<&str> = self.ksl_lines.iter().map(|l| l.text.as_str()).collect();
+						let scoped_occurrences =
+							match crate::lang::scope::visible_scope(&name, clicked_line, &raw, &self.depth_map) {
+								Some(range) => all_occurrences
+									.into_iter()
+									.filter(|occurrence| range.contains(&occurrence.ksl_line_idx))
+									.collect(),
+								None => all_occurrences,
+							};
 						(scoped_occurrences, Some(name))
 					}
 				};
@@ -329,16 +321,16 @@ impl KaisekiState {
 					.map(|s| s.to_string_lossy().to_string())
 					.unwrap_or_else(|| "unknown".to_string());
 
-				self.ksl_lines       = Arc::new(ksl_lines);
+				self.ksl_lines = Arc::new(ksl_lines);
 				// .kvl files do not carry a C source block yet — clear the accordion.
-				self.source_lines    = Arc::new(Vec::new());
-				self.source_map      = Arc::new(Vec::new());
-				self.expanded_spans  .clear();
+				self.source_lines = Arc::new(Vec::new());
+				self.source_map = Arc::new(Vec::new());
+				self.expanded_spans.clear();
 				self.active_variable = None;
 				self.var_occurrences = Arc::new(Vec::new());
-				self.depth_map       = depth_map;
-				self.selected_kvl    = Some(path);
-				self.selected_name   = display_name;
+				self.depth_map = depth_map;
+				self.selected_kvl = Some(path);
+				self.selected_name = display_name;
 			}
 		}
 		Task::none()
@@ -349,9 +341,10 @@ impl KaisekiState {
 			return Task::none();
 		};
 		let display_rows = self.build_display_rows();
-		let Some(display_idx) = display_rows.iter().position(|r| {
-			matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == ksl_line_idx)
-		}) else {
+		let Some(display_idx) = display_rows
+			.iter()
+			.position(|r| matches!(r, DisplayRow::KslLine { ksl_idx, .. } if *ksl_idx == ksl_line_idx))
+		else {
 			return Task::none();
 		};
 		// Place the target line a few rows from the top for comfortable reading.
@@ -378,27 +371,28 @@ impl KaisekiState {
 				.into()
 		} else {
 			// Collapsed sidebar: narrow MANTLE strip with a › button at the top.
-			let expand_btn = button(
-				iced::widget::text("›").font(Font::MONOSPACE).size(14),
-			)
-			.style(|_, _| button::Style {
-				background: Some(Background::Color(Color::TRANSPARENT)),
-				text_color: SUBTEXT0,
-				border: Border::default(),
-				..Default::default()
-			})
-			.on_press(Message::ToggleSidebar)
-			.padding(iced::Padding { top: 6.0, bottom: 6.0, left: 8.0, right: 8.0 });
+			let expand_btn = button(iced::widget::text("›").font(Font::MONOSPACE).size(14))
+				.style(|_, _| button::Style {
+					background: Some(Background::Color(Color::TRANSPARENT)),
+					text_color: SUBTEXT0,
+					border: Border::default(),
+					..Default::default()
+				})
+				.on_press(Message::ToggleSidebar)
+				.padding(iced::Padding {
+					top: 6.0,
+					bottom: 6.0,
+					left: 8.0,
+					right: 8.0,
+				});
 
-			let collapsed_strip = container(
-				column![expand_btn].width(Length::Fill),
-			)
-			.width(Length::Fixed(28.0))
-			.height(Length::Fill)
-			.style(move |_| container::Style {
-				background: Some(Background::Color(MANTLE)),
-				..Default::default()
-			});
+			let collapsed_strip = container(column![expand_btn].width(Length::Fill))
+				.width(Length::Fixed(28.0))
+				.height(Length::Fill)
+				.style(move |_| container::Style {
+					background: Some(Background::Color(MANTLE)),
+					..Default::default()
+				});
 
 			row![collapsed_strip, make_separator(), self.view_code_panel()]
 				.width(Length::Fill)
@@ -414,17 +408,20 @@ impl KaisekiState {
 		items.push(
 			container(
 				row![
-					button(
-						iced::widget::text("‹").font(Font::MONOSPACE).size(12),
-					)
-					.style(|_, _| button::Style {
-						background: Some(Background::Color(Color::TRANSPARENT)),
-						text_color: SUBTEXT0,
-						border: Border::default(),
-						..Default::default()
-					})
-					.on_press(Message::ToggleSidebar)
-					.padding(iced::Padding { top: 0.0, bottom: 0.0, left: 0.0, right: 8.0 }),
+					button(iced::widget::text("‹").font(Font::MONOSPACE).size(12),)
+						.style(|_, _| button::Style {
+							background: Some(Background::Color(Color::TRANSPARENT)),
+							text_color: SUBTEXT0,
+							border: Border::default(),
+							..Default::default()
+						})
+						.on_press(Message::ToggleSidebar)
+						.padding(iced::Padding {
+							top: 0.0,
+							bottom: 0.0,
+							left: 0.0,
+							right: 8.0
+						}),
 					iced::widget::text("files")
 						.font(Font::MONOSPACE)
 						.size(10)
@@ -443,18 +440,21 @@ impl KaisekiState {
 			.into(),
 		);
 
-		items.extend(render_kvl_tree(&self.kvl_tree, &self.selected_kvl, &self.expanded_dirs, 0));
+		items.extend(render_kvl_tree(
+			&self.kvl_tree,
+			&self.selected_kvl,
+			&self.expanded_dirs,
+			0,
+		));
 
-		container(
-			scrollable(column(items).width(Length::Fill)).height(Length::Fill),
-		)
-		.width(Length::Fixed(SIDEBAR_W))
-		.height(Length::Fill)
-		.style(move |_| container::Style {
-			background: Some(Background::Color(MANTLE)),
-			..Default::default()
-		})
-		.into()
+		container(scrollable(column(items).width(Length::Fill)).height(Length::Fill))
+			.width(Length::Fixed(SIDEBAR_W))
+			.height(Length::Fill)
+			.style(move |_| container::Style {
+				background: Some(Background::Color(MANTLE)),
+				..Default::default()
+			})
+			.into()
 	}
 
 	fn view_code_panel(&self) -> Element<'_, Message> {
@@ -537,10 +537,7 @@ fn panel_header<'a>(file_name: impl Into<String>) -> Element<'a, Message> {
 	column![
 		container(
 			row![
-				iced::widget::text(title)
-					.font(Font::MONOSPACE)
-					.size(11)
-					.color(OVERLAY0),
+				iced::widget::text(title).font(Font::MONOSPACE).size(11).color(OVERLAY0),
 				container(iced::widget::text("KSL").font(Font::MONOSPACE).size(9).color(TEXT_COL))
 					.padding(iced::Padding {
 						top: 1.0,
@@ -596,28 +593,26 @@ fn render_kvl_tree<'a>(
 				let is_selected = selected.as_deref() == Some(path.as_path());
 				let file_path = path.clone();
 				elements.push(
-					button(
-						iced::widget::text(display_name.as_str())
-							.font(Font::MONOSPACE)
-							.size(11),
-					)
-					.style(move |_, _| button::Style {
-						background: Some(Background::Color(
-							if is_selected { SURFACE0 } else { Color::TRANSPARENT },
-						)),
-						text_color: if is_selected { TEXT_COL } else { SUBTEXT0 },
-						border: Border::default(),
-						..Default::default()
-					})
-					.on_press(Message::SelectKvl(file_path))
-					.width(Length::Fill)
-					.padding(iced::Padding {
-						top: 4.0,
-						bottom: 4.0,
-						left: left_pad,
-						right: 8.0,
-					})
-					.into(),
+					button(iced::widget::text(display_name.as_str()).font(Font::MONOSPACE).size(11))
+						.style(move |_, _| button::Style {
+							background: Some(Background::Color(if is_selected {
+								SURFACE0
+							} else {
+								Color::TRANSPARENT
+							})),
+							text_color: if is_selected { TEXT_COL } else { SUBTEXT0 },
+							border: Border::default(),
+							..Default::default()
+						})
+						.on_press(Message::SelectKvl(file_path))
+						.width(Length::Fill)
+						.padding(iced::Padding {
+							top: 4.0,
+							bottom: 4.0,
+							left: left_pad,
+							right: 8.0,
+						})
+						.into(),
 				);
 			}
 			KvlEntry::Dir { name, path, children } => {

@@ -117,10 +117,7 @@ pub fn find_fn_definition(name: &str, lines: &[HighlightedLine]) -> Option<usize
 				continue;
 			}
 			// Preceded by the `fn` keyword → this is the definition site.
-			let prev = tokens[..tok_pos]
-				.iter()
-				.rev()
-				.find(|t| t.kind != TokenKind::Whitespace);
+			let prev = tokens[..tok_pos].iter().rev().find(|t| t.kind != TokenKind::Whitespace);
 			if matches!(prev, Some(t) if t.kind == TokenKind::Keyword && &line.text[t.range.clone()] == "fn") {
 				return Some(line_idx);
 			}

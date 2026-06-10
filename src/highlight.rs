@@ -4,22 +4,20 @@ use iced::Color;
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings};
 
 use crate::lang::lexer::TokenKind;
-use crate::theme::{
-	MAUVE, PEACH, YELLOW, GREEN, SAPPHIRE_DIM, OVERLAY0, SKY, SUBTEXT1, TEXT_COL,
-};
+use crate::theme::{GREEN, MAUVE, OVERLAY0, PEACH, SAPPHIRE_DIM, SKY, SUBTEXT1, TEXT_COL, YELLOW};
 use crate::types::HighlightedLine;
 
 fn token_color(kind: TokenKind) -> Option<Color> {
 	Some(match kind {
-		TokenKind::Keyword    => MAUVE,
-		TokenKind::Atom       => PEACH,
+		TokenKind::Keyword => MAUVE,
+		TokenKind::Atom => PEACH,
 		TokenKind::Number | TokenKind::Offset => YELLOW,
 		TokenKind::DocComment => GREEN,
 		TokenKind::SectionSep => SAPPHIRE_DIM,
-		TokenKind::Comment    => OVERLAY0,
-		TokenKind::Operator   => SKY,
-		TokenKind::Punct      => SUBTEXT1,
-		TokenKind::Ident      => TEXT_COL,
+		TokenKind::Comment => OVERLAY0,
+		TokenKind::Operator => SKY,
+		TokenKind::Punct => SUBTEXT1,
+		TokenKind::Ident => TEXT_COL,
 		TokenKind::Whitespace | TokenKind::Unknown => return None,
 	})
 }

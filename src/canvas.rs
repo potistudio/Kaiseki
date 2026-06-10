@@ -2,24 +2,23 @@ use std::sync::Arc;
 
 use iced::{Color, Font, Pixels, Point, Rectangle, Size, alignment, mouse, widget::canvas};
 
+use crate::lang::SourceSpan;
 use crate::lang::lexer::TokenKind;
 use crate::message::Message;
 use crate::theme::{
-	ACCORDION_BG, ACCORDION_FG, BASE, CODE_X, CHAR_W, CONN_GUTTER_W, DOT_R, FONT_SIZE,
-	GUTTER_DIM, GUTTER_FG, RAIL_COL, RAIL_W, ROW_H, SNIPPET_BG, SNIPPET_BORDER, TEXT_COL, TOP_PAD,
-	var_bg, var_dot,
+	ACCORDION_BG, ACCORDION_FG, BASE, CHAR_W, CODE_X, CONN_GUTTER_W, DOT_R, FONT_SIZE, GUTTER_DIM, GUTTER_FG, RAIL_COL,
+	RAIL_W, ROW_H, SNIPPET_BG, SNIPPET_BORDER, TEXT_COL, TOP_PAD, var_bg, var_dot,
 };
 use crate::types::{DisplayRow, HighlightedLine, VarOccurrence, VarRole};
-use crate::lang::SourceSpan;
 
 /// Full-panel canvas: renders all display rows and handles mouse events.
 /// Wrapped in `scrollable` — canvas height equals total content height.
 pub struct CodeCanvas {
-	pub display_rows:    Arc<Vec<DisplayRow>>,
-	pub ksl_lines:       Arc<Vec<HighlightedLine>>,
-	pub source_lines:    Arc<Vec<HighlightedLine>>,
+	pub display_rows: Arc<Vec<DisplayRow>>,
+	pub ksl_lines: Arc<Vec<HighlightedLine>>,
+	pub source_lines: Arc<Vec<HighlightedLine>>,
 	pub var_occurrences: Arc<Vec<VarOccurrence>>,
-	pub source_map:      Arc<Vec<SourceSpan>>,
+	pub source_map: Arc<Vec<SourceSpan>>,
 	pub active_variable: Option<String>,
 }
 
@@ -243,7 +242,7 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 	let dot_x = CONN_GUTTER_W / 2.0;
 
 	struct Entry {
-		y:    f32,
+		y: f32,
 		role: VarRole,
 	}
 
@@ -264,7 +263,7 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 	}
 
 	let y_first = entries.first().unwrap().y;
-	let y_last  = entries.last().unwrap().y;
+	let y_last = entries.last().unwrap().y;
 
 	// ── Vertical spanning rail ────────────────────────────────────────────────
 	if y_first < y_last {
@@ -285,7 +284,7 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 	// sits flush against the numbers with a small gap, regardless of digit count.
 	let tick_x0 = dot_x + DOT_R + 2.0;
 	let depth = 6.0; // arrowhead depth  (along the dominant axis)
-	let half  = 4.0; // arrowhead half-width (perpendicular axis)
+	let half = 4.0; // arrowhead half-width (perpendicular axis)
 
 	// Compute tick_x1 so the arrow tip lands just left of the line numbers.
 	let max_line_num = display_rows
@@ -326,7 +325,7 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 					);
 				}
 				let mut path = canvas::path::Builder::new();
-				path.move_to(Point::new(tick_x1, entry.y));          // tip (right)
+				path.move_to(Point::new(tick_x1, entry.y)); // tip (right)
 				path.line_to(Point::new(tick_x1 - depth, entry.y - half)); // base top
 				path.line_to(Point::new(tick_x1 - depth, entry.y + half)); // base bottom
 				path.close();
@@ -345,8 +344,8 @@ fn draw_connection_gutter(frame: &mut canvas::Frame, display_rows: &[DisplayRow]
 				}
 				let mut path = canvas::path::Builder::new();
 				path.move_to(Point::new(tick_x1 - depth, entry.y)); // tip (left)
-				path.line_to(Point::new(tick_x1, entry.y - half));  // base top-right
-				path.line_to(Point::new(tick_x1, entry.y + half));  // base bottom-right
+				path.line_to(Point::new(tick_x1, entry.y - half)); // base top-right
+				path.line_to(Point::new(tick_x1, entry.y + half)); // base bottom-right
 				path.close();
 				frame.fill(&path.build(), color);
 			}

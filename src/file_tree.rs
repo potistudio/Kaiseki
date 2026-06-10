@@ -4,7 +4,9 @@ use crate::types::KvlEntry;
 
 /// Recursively scan a .kvp directory and return a KvlEntry tree.
 pub fn scan_kvp(dir: &Path) -> Vec<KvlEntry> {
-	let Ok(read_dir) = std::fs::read_dir(dir) else { return Vec::new() };
+	let Ok(read_dir) = std::fs::read_dir(dir) else {
+		return Vec::new();
+	};
 	let mut raw: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
 	raw.sort_by_key(|e| e.file_name());
 	raw.into_iter()
@@ -14,7 +16,11 @@ pub fn scan_kvp(dir: &Path) -> Vec<KvlEntry> {
 			if path.is_dir() {
 				let children = scan_kvp(&path);
 				// Omit empty directories.
-				(!children.is_empty()).then_some(KvlEntry::Dir { name: file_name, path: path.clone(), children })
+				(!children.is_empty()).then_some(KvlEntry::Dir {
+					name: file_name,
+					path: path.clone(),
+					children,
+				})
 			} else if path.extension().map_or(false, |ext| ext == "kvl") {
 				let display_name = path
 					.file_stem()
